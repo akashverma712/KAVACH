@@ -1,0 +1,66 @@
+# Kavach — Docker Compose
+#
+#   Development (database only):   docker compose up -d db
+#   Full stack in containers:      docker compose --profile full up -d --build
+#
+# Full stack URLs: student app http://localhost:8080 · admin panel http://localhost:8081 · API http://localhost:5000
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: kavach-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: kavach
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kavach_dev_password}
+      POSTGRES_DB: kavach
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - kavach_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kavach -d kavach"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    profiles: ["full"]
+    build: ./backend
+    container_name: kavach-backend
+    restart: unless-stopped
+    env_file: ./backend/.env
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgres://kavach:${POSTGRES_PASSWORD:-kavach_dev_password}@db:5432/kavach
+      TRUST_PROXY: "1"
+      CLIENT_ORIGINS: http://localhost:8080,http://localhost:8081
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "5000:5000"
+    volumes:
+      - kavach_uploads:/app/uploads
+
+  student:
+    profiles: ["full"]
+    build: ./student
+    container_name: kavach-student
+    restart: unless-stopped
+    depends_on: [backend]
+    ports:
+      - "8080:80"
+
+  admin:
+    profiles: ["full"]
+    build: ./admin
+    container_name: kavach-admin
+    restart: unless-stopped
+    depends_on: [backend]
+    ports:
+      - "8081:80"
+
+volumes:
+  kavach_pgdata:
+  kavach_uploads:

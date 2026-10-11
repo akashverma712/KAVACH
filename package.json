@@ -1,0 +1,22 @@
+{
+  "name": "kavach",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Kavach — campus safety, emergency response and student wellbeing system for BIT Sindri",
+  "engines": { "node": ">=18.18" },
+  "scripts": {
+    "setup": "npm install && npm --prefix backend install && npm --prefix student install && npm --prefix admin install && node scripts/setup-env.js",
+    "db:up": "docker compose up -d db",
+    "db:down": "docker compose down",
+    "db:reset": "docker compose down -v && docker compose up -d db",
+    "dev": "concurrently -k -n api,student,admin -c red,blue,green \"npm --prefix backend run dev\" \"npm --prefix student run dev\" \"npm --prefix admin run dev\"",
+    "build": "npm --prefix student run build && npm --prefix admin run build",
+    "preview": "concurrently -k -n api,student,admin -c red,blue,green \"npm --prefix backend start\" \"npm --prefix student run preview\" \"npm --prefix admin run preview\"",
+    "docker:full": "docker compose --profile full up -d --build",
+    "docker:logs": "docker compose --profile full logs -f backend"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

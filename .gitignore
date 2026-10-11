@@ -1,0 +1,11 @@
+node_modules
+dist
+dev-dist
+.env
+*.log
+.DS_Store
+backend/uploads/public/*
+backend/uploads/private/*
+backend/uploads/tmp/*
+!backend/uploads/public/.gitkeep
+!backend/uploads/private/.gitkeep
