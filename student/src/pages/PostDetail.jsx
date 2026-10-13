@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, CheckCircle2, EyeOff, Flag, Lock, Send, Trash2, XCircle } from 'lucide-react';
+import { ArrowLeft, CheckCircle2, EyeOff, Flag, Lock, Send, Trash2, Users, XCircle } from 'lucide-react';
 import { ImageLightbox } from '../components/ImageLightbox';
-import { ReactionBar } from '../components/ReactionBar';
+import { LikeButton } from '../components/LikeButton';
 import { Avatar, Badge, Button, EmptyState, Modal, PageLoader, Textarea } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import { api } from '../lib/api';
@@ -69,7 +69,7 @@ export default function PostDetail() {
   const load = useCallback(async () => {
     try {
       const [d, c] = await Promise.all([api(`/posts/${id}`), api(`/posts/${id}/comments`)]);
-      setPost(d.post); setUpdates(d.updates); setComments(c.items);
+      setPost(d.post); setUpdates(d.updates); setComments(c.items || []);
     } catch (err) { setError(err); }
   }, [id]);
   useEffect(() => { load(); }, [load]);
@@ -119,8 +119,9 @@ export default function PostDetail() {
   }
   if (!post) return <PageLoader />;
 
-  const sev = SEVERITY[post.severity];
+  const sev = SEVERITY[post.severity] || SEVERITY[1];
   const closed = post.status === 'closed';
+  const isAdminOnly = post.visibility === 'admin';
 
   return (
     <div className="mx-auto max-w-3xl">
@@ -132,7 +133,25 @@ export default function PostDetail() {
           {post.is_hidden && (
             <p className="mb-4 flex items-start gap-2 rounded-control bg-brass/15 px-3 py-2.5 text-sm font-bold text-brass"><EyeOff className="mt-0.5 h-4 w-4 shrink-0" /> Only you can see this post. {post.hidden_reason}</p>
           )}
+
+          {isAdminOnly && (
+            <div className="mb-4 flex items-start gap-2.5 rounded-control bg-raised border border-line p-3.5 text-sm">
+              <Lock className="mt-0.5 h-4 w-4 shrink-0 text-ink" />
+              <div>
+                <p className="font-bold text-ink">Private Problem (Admin only)</p>
+                <p className="text-muted text-xs sm:text-sm">
+                  Only you and the campus admin can see this problem. Likes and comments are turned off. The admin will follow up through progress updates below.
+                </p>
+              </div>
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center gap-2">
+            {isAdminOnly ? (
+              <Badge tone="ink"><Lock className="h-3 w-3 mr-1 inline" /> Admin only</Badge>
+            ) : (
+              <Badge tone="muted"><Users className="h-3 w-3 mr-1 inline" /> Everyone</Badge>
+            )}
             <Badge tone={STATUS[post.status].tone} dot>{STATUS[post.status].label}</Badge>
             <Badge tone={sev.tone}>{sev.label} severity</Badge>
             <Badge tone="muted">{CATEGORIES[post.category]}</Badge>
@@ -144,7 +163,7 @@ export default function PostDetail() {
           </div>
           <p className="mt-5 whitespace-pre-wrap text-[16px] leading-relaxed">{post.description}</p>
 
-          {post.images.length > 0 && (
+          {post.images?.length > 0 && (
             <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-3">
               {post.images.map((src, i) => (
                 <button key={src} type="button" onClick={() => setLightbox(i)} className="aspect-square overflow-hidden rounded-control bg-raised" aria-label={`Open photo ${i + 1}`}>
@@ -155,11 +174,19 @@ export default function PostDetail() {
           )}
 
           <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-line pt-5">
-            <ReactionBar post={post} onChange={setPost} />
-            {!post.is_owner && (
-              post.i_reported
-                ? <span className="text-sm text-muted">You reported this post</span>
-                : <button type="button" onClick={() => setReporting(true)} className="inline-flex items-center gap-1.5 text-sm font-bold text-muted hover:text-signal"><Flag className="h-4 w-4" /> Report</button>
+            {isAdminOnly ? (
+              <span className="flex items-center gap-1.5 text-xs font-bold text-muted">
+                <Lock className="h-4 w-4" /> Private problem — student responses are turned off
+              </span>
+            ) : (
+              <>
+                <LikeButton post={post} onChange={setPost} size="md" />
+                {!post.is_owner && (
+                  post.i_reported
+                    ? <span className="text-sm text-muted">You reported this post</span>
+                    : <button type="button" onClick={() => setReporting(true)} className="inline-flex items-center gap-1.5 text-sm font-bold text-muted hover:text-signal"><Flag className="h-4 w-4" /> Report</button>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -197,35 +224,37 @@ export default function PostDetail() {
         </ol>
       </section>
 
-      <section id="comments" className="mt-10 scroll-mt-20" aria-labelledby="comments-title">
-        <h2 id="comments-title" className="text-lg font-bold">Discussion <span className="font-normal text-muted">({comments.length})</span></h2>
-        <ul className="mt-4 space-y-4">
-          {comments.length === 0 && <li className="text-muted">No comments yet. Facing the same thing? Say so here.</li>}
-          {comments.map((c) => (
-            <li key={c.id} className="flex gap-3">
-              <Avatar name={c.author_name} size={34} />
-              <div className="min-w-0 flex-1 rounded-panel rounded-tl-md bg-surface px-4 py-3 border border-line">
-                <div className="flex items-start justify-between gap-2">
-                  <p className="text-sm"><span className="font-bold">{c.author_name}</span><span className="text-muted">{c.author_branch ? `, ${c.author_branch}` : ''}, {timeAgo(c.created_at)}</span></p>
-                  {c.is_mine && <button type="button" onClick={() => removeComment(c.id)} className="text-muted hover:text-signal" aria-label="Delete comment"><Trash2 className="h-4 w-4" /></button>}
+      {!isAdminOnly && (
+        <section id="comments" className="mt-10 scroll-mt-20" aria-labelledby="comments-title">
+          <h2 id="comments-title" className="text-lg font-bold">Discussion <span className="font-normal text-muted">({comments.length})</span></h2>
+          <ul className="mt-4 space-y-4">
+            {comments.length === 0 && <li className="text-muted">No comments yet. Facing the same thing? Say so here.</li>}
+            {comments.map((c) => (
+              <li key={c.id} className="flex gap-3">
+                <Avatar name={c.author_name} size={34} />
+                <div className="min-w-0 flex-1 rounded-panel rounded-tl-md bg-surface px-4 py-3 border border-line">
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="text-sm"><span className="font-bold">{c.author_name}</span><span className="text-muted">{c.author_branch ? `, ${c.author_branch}` : ''}, {timeAgo(c.created_at)}</span></p>
+                    {c.is_mine && <button type="button" onClick={() => removeComment(c.id)} className="text-muted hover:text-signal" aria-label="Delete comment"><Trash2 className="h-4 w-4" /></button>}
+                  </div>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-[15px]">{c.body}</p>
                 </div>
-                <p className="mt-1 whitespace-pre-wrap break-words text-[15px]">{c.body}</p>
-              </div>
-            </li>
-          ))}
-        </ul>
-        {closed ? (
-          <p className="mt-5 flex items-center gap-2 text-muted"><Lock className="h-4 w-4" /> This problem is closed, so new comments are off.</p>
-        ) : (
-          <form onSubmit={comment} className="mt-5 flex items-end gap-2">
-            <label htmlFor="comment" className="sr-only">Write a comment</label>
-            <textarea id="comment" rows={1} value={body} onChange={(e) => setBody(e.target.value)} maxLength={1000} placeholder="Add to the discussion…"
-              onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) comment(e); }}
-              className="field-input min-h-[46px] flex-1 resize-none" />
-            <Button type="submit" size="icon" className="h-[46px] w-[46px] shrink-0" loading={sending} disabled={!body.trim()} aria-label="Send comment">{!sending && <Send className="h-5 w-5" />}</Button>
-          </form>
-        )}
-      </section>
+              </li>
+            ))}
+          </ul>
+          {closed ? (
+            <p className="mt-5 flex items-center gap-2 text-muted"><Lock className="h-4 w-4" /> This problem is closed, so new comments are off.</p>
+          ) : (
+            <form onSubmit={comment} className="mt-5 flex items-end gap-2">
+              <label htmlFor="comment" className="sr-only">Write a comment</label>
+              <textarea id="comment" rows={1} value={body} onChange={(e) => setBody(e.target.value)} maxLength={1000} placeholder="Add to the discussion…"
+                onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) comment(e); }}
+                className="field-input min-h-[46px] flex-1 resize-none" />
+              <Button type="submit" size="icon" className="h-[46px] w-[46px] shrink-0" loading={sending} disabled={!body.trim()} aria-label="Send comment">{!sending && <Send className="h-5 w-5" />}</Button>
+            </form>
+          )}
+        </section>
+      )}
 
       <ImageLightbox images={post.images} index={lightbox} onClose={() => setLightbox(null)} />
       <ReportModal open={reporting} onClose={() => setReporting(false)} postId={post.id} onDone={() => { setReporting(false); setPost((p) => ({ ...p, i_reported: true })); }} />

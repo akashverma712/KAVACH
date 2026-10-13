@@ -5,6 +5,7 @@ import { pool, waitForDb } from './db/pool.js';
 import { seed } from './db/seed.js';
 import { startRateLimitJanitor } from './middleware/rateLimit.js';
 import { startOtpJanitor } from './services/otp.service.js';
+import { closeRealtime } from './services/realtime.service.js';
 import { colors as c } from './services/console.js';
 
 async function main() {
@@ -38,6 +39,7 @@ ${c.bold}🛡  Kavach API${c.reset} running on ${c.cyan}http://localhost:${env.p
   const shutdown = (signal) => {
     console.log(`\n${signal} received — shutting down gracefully`);
     server.close(async () => {
+      await closeRealtime().catch(() => {});
       await pool.end().catch(() => {});
       process.exit(0);
     });

@@ -25,21 +25,26 @@ export const STATUS_LABEL = {
 
 /** Shared SELECT for post cards: author (no contact details), reaction counts, viewer's reaction. */
 export const POST_SELECT = (viewerParam) => `
-  p.id, p.user_id, p.title, p.description, p.category, p.severity, p.images, p.status,
+  p.id, p.user_id, p.title, p.description, p.category, p.severity, p.images, p.status, p.visibility,
   p.admin_resolved, p.student_resolved, p.closed_at, p.closed_by, p.is_hidden, p.hidden_reason,
   p.report_count, p.created_at, p.updated_at,
   u.name AS author_name, u.branch AS author_branch, u.batch AS author_batch,
   (SELECT count(*)::int FROM comments c WHERE c.post_id = p.id AND NOT c.is_deleted) AS comment_count,
   (SELECT COALESCE(json_object_agg(t.type, t.n), '{}'::json)
      FROM (SELECT type, count(*)::int AS n FROM reactions r WHERE r.post_id = p.id GROUP BY type) t) AS reactions,
-  (SELECT count(*)::int FROM reactions r WHERE r.post_id = p.id) AS reaction_total
+  (SELECT count(*)::int FROM reactions r WHERE r.post_id = p.id) AS reaction_total,
+  (SELECT count(*)::int FROM reactions r WHERE r.post_id = p.id) AS like_count,
+  (SELECT count(DISTINCT c.user_id)::int FROM comments c WHERE c.post_id = p.id AND NOT c.is_deleted) AS commenter_count
   ${viewerParam ? `, (SELECT type FROM reactions r WHERE r.post_id = p.id AND r.user_id = ${viewerParam}) AS my_reaction` : ''}`;
 
+export const VISIBILITY = ['everyone', 'admin'];
+
 const listSchema = z.object({
-  sort: z.enum(['recent', 'severity', 'popular']).default('recent'),
+  scope: z.enum(['everyone', 'mine']).optional(),
+  mine: z.enum(['true', 'false']).optional(), // older clients
+  sort: z.enum(['recent', 'popular', 'liked', 'discussed', 'severity']).default('recent'),
   status: z.enum(['all', 'active', 'open', 'marked_for_solving', 'in_progress', 'under_review', 'solved', 'closed']).default('all'),
   category: z.enum(['all', ...POST_CATEGORIES]).default('all'),
-  mine: z.enum(['true', 'false']).default('false'),
   q: z.string().trim().max(100).optional(),
   page: z.string().optional(),
   limit: z.string().optional(),
@@ -47,19 +52,28 @@ const listSchema = z.object({
 
 const ORDER = {
   recent: 'p.created_at DESC',
+  popular: '(p.like_count * 2 + p.comment_count * 3) DESC, p.created_at DESC',
+  liked: 'p.like_count DESC, p.created_at DESC',
+  discussed: 'p.comment_count DESC, p.created_at DESC',
   severity: 'p.severity DESC, p.created_at DESC',
-  popular: '(reaction_total + comment_count) DESC, p.created_at DESC',
 };
 
+/**
+ * Community feed.
+ *   scope=everyone (default): problems shared with everyone, from all students
+ *   scope=mine: every problem the student posted, including admin-only and hidden ones
+ */
 router.get('/', validate(listSchema, 'query'), ah(async (req, res) => {
   const f = req.validatedQuery;
+  const scope = f.scope || (f.mine === 'true' ? 'mine' : 'everyone');
   const { page, limit, offset } = paginate(f, { defaultLimit: 15, maxLimit: 50 });
   const params = [req.user.id];
-  const where = ['(NOT p.is_hidden OR p.user_id = $1)'];
+  const where = scope === 'mine'
+    ? ['p.user_id = $1']
+    : [`p.visibility = 'everyone'`, '(NOT p.is_hidden OR p.user_id = $1)'];
   if (f.status === 'active') where.push(`p.status <> 'closed'`);
   else if (f.status !== 'all') { params.push(f.status); where.push(`p.status = $${params.length}`); }
   if (f.category !== 'all') { params.push(f.category); where.push(`p.category = $${params.length}`); }
-  if (f.mine === 'true') where.push('p.user_id = $1');
   if (f.q) { params.push(`%${f.q.replace(/[%_\\]/g, '\\$&')}%`); where.push(`(p.title ILIKE $${params.length} OR p.description ILIKE $${params.length})`); }
   params.push(limit + 1, offset);
 
@@ -71,7 +85,7 @@ router.get('/', validate(listSchema, 'query'), ah(async (req, res) => {
     params,
   );
   const hasMore = rows.length > limit;
-  res.json({ items: rows.slice(0, limit).map((p) => ({ ...p, is_owner: p.user_id === req.user.id })), page, has_more: hasMore });
+  res.json({ items: rows.slice(0, limit).map((p) => ({ ...p, is_owner: p.user_id === req.user.id })), page, has_more: hasMore, scope });
 }));
 
 const createSchema = z.object({
@@ -79,22 +93,24 @@ const createSchema = z.object({
   description: z.string().trim().min(10, 'Describe the problem in at least 10 characters').max(3000, 'Description is too long'),
   category: z.enum(POST_CATEGORIES).default('other'),
   severity: z.coerce.number().int().min(1).max(4).default(2),
+  visibility: z.enum(VISIBILITY, { errorMap: () => ({ message: 'Choose who can see this problem: everyone or admin only' }) }).default('everyone'),
 });
 
 router.post('/', postCreateLimiter, imageUpload.array('images', 4), validate(createSchema), ah(async (req, res) => {
   const images = await finalizeFiles(req.files || [], 'public', IMAGE_EXT);
-  const { title, description, category, severity } = req.body;
+  const { title, description, category, severity, visibility } = req.body;
   const post = await tx(async (c) => {
     const { rows: [p] } = await c.query(
-      `INSERT INTO posts (user_id, title, description, category, severity, images)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [req.user.id, title, description, category, severity, images.map((i) => i.url)],
+      `INSERT INTO posts (user_id, title, description, category, severity, images, visibility)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [req.user.id, title, description, category, severity, images.map((i) => i.url), visibility],
     );
-    await c.query(`INSERT INTO post_updates (post_id, actor, status, note) VALUES ($1, 'owner', 'open', 'Problem posted')`, [p.id]);
+    await c.query(`INSERT INTO post_updates (post_id, actor, status, note) VALUES ($1, 'owner', 'open', $2)`,
+      [p.id, visibility === 'admin' ? 'Problem posted privately (only the admin can see it)' : 'Problem posted for everyone']);
     return p;
   });
-  await audit(req, 'post.create', post.id);
-  res.status(201).json({ id: post.id });
+  await audit(req, 'post.create', post.id, { visibility });
+  res.status(201).json({ id: post.id, visibility });
 }));
 
 async function loadPost(id, viewerId) {
@@ -102,8 +118,16 @@ async function loadPost(id, viewerId) {
     `SELECT ${POST_SELECT('$2')} FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = $1`,
     [id, viewerId],
   );
-  if (!p || (p.is_hidden && p.user_id !== viewerId)) throw notFound('This problem is no longer available');
+  // Admin-only problems are visible to the student who posted them (admins use the admin API)
+  if (!p || (p.user_id !== viewerId && (p.is_hidden || p.visibility !== 'everyone'))) throw notFound('This problem is no longer available');
   return p;
+}
+
+/** Likes and comments exist only on problems shared with everyone. */
+function requirePublic(p) {
+  if (p.visibility !== 'everyone') {
+    throw forbidden('Likes and comments are only available on problems shared with everyone', 'PRIVATE_POST');
+  }
 }
 
 router.get('/:id', idParam, ah(async (req, res) => {
@@ -125,8 +149,19 @@ router.delete('/:id', writeLimiter, idParam, ah(async (req, res) => {
 
 /* ───── Reactions ───── */
 
+// Like = "I face this too". One per student per problem; tapping again removes it.
+router.post('/:id/like', writeLimiter, idParam, ah(async (req, res) => {
+  const p = await loadPost(req.params.id, req.user.id);
+  requirePublic(p);
+  const { rowCount } = await query(`DELETE FROM reactions WHERE post_id = $1 AND user_id = $2`, [p.id, req.user.id]);
+  if (!rowCount) await query(`INSERT INTO reactions (post_id, user_id, type) VALUES ($1, $2, 'like') ON CONFLICT DO NOTHING`, [p.id, req.user.id]);
+  const { rows: [{ n }] } = await query('SELECT count(*)::int AS n FROM reactions WHERE post_id = $1', [p.id]);
+  res.json({ liked: !rowCount, like_count: n });
+}));
+
 router.post('/:id/react', writeLimiter, idParam, validate(z.object({ type: z.enum(REACTIONS) }).strict()), ah(async (req, res) => {
   const p = await loadPost(req.params.id, req.user.id);
+  requirePublic(p);
   if (p.my_reaction === req.body.type) {
     await query('DELETE FROM reactions WHERE post_id = $1 AND user_id = $2', [p.id, req.user.id]);
   } else {
@@ -137,13 +172,14 @@ router.post('/:id/react', writeLimiter, idParam, validate(z.object({ type: z.enu
     );
   }
   const fresh = await loadPost(p.id, req.user.id);
-  res.json({ reactions: fresh.reactions, reaction_total: fresh.reaction_total, my_reaction: fresh.my_reaction });
+  res.json({ reactions: fresh.reactions, reaction_total: fresh.reaction_total, like_count: fresh.like_count, my_reaction: fresh.my_reaction });
 }));
 
 /* ───── Comments ───── */
 
 router.get('/:id/comments', idParam, ah(async (req, res) => {
-  await loadPost(req.params.id, req.user.id);
+  const post = await loadPost(req.params.id, req.user.id);
+  if (post.visibility !== 'everyone') return res.json({ items: [] });
   const { limit, offset } = paginate(req.query, { defaultLimit: 50, maxLimit: 100 });
   const { rows } = await query(
     `SELECT c.id, c.body, c.created_at, c.user_id, u.name AS author_name, u.branch AS author_branch, u.batch AS author_batch
@@ -159,6 +195,7 @@ router.post('/:id/comments', writeLimiter, idParam, validate(z.object({
   body: z.string().trim().min(1, 'Write a comment').max(1000, 'Comments can be up to 1000 characters'),
 }).strict()), ah(async (req, res) => {
   const p = await loadPost(req.params.id, req.user.id);
+  requirePublic(p);
   if (p.status === 'closed') throw badRequest('This problem is closed, so new comments are turned off', 'POST_CLOSED');
   const { rows: [c] } = await query(
     'INSERT INTO comments (post_id, user_id, body) VALUES ($1, $2, $3) RETURNING id, body, created_at, user_id',

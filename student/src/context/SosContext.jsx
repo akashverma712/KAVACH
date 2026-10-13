@@ -1,16 +1,29 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, BellRing, Check, MessageSquare, Phone, Volume2, VolumeX, WifiOff, X } from 'lucide-react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { api } from '../lib/api';
 import { enqueueSos, flushSosQueue, smsLink } from '../lib/offlineQueue';
+import { playCancelTone, playCountdownTick, playSuccessChime } from '../lib/sounds';
+import { uuidv4 } from '../lib/uuid';
 import { useAlarm } from '../hooks/useAlarm';
-import { useVoiceTrigger } from '../hooks/useVoiceTrigger';
-import { Button } from '../components/ui';
+import { useVoiceGuard } from '../hooks/useVoiceGuard';
+import { SosOverlay } from '../components/SosOverlay';
 import { useAuth } from './AuthContext';
 import { useGeo } from './LocationContext';
 import { useToast } from './ToastContext';
 
 const SosCtx = createContext(null);
+
 const COUNTDOWN_MS = 10_000;
+const SHARE_EVERY_MS = 15_000;
+const RETRY_DELAYS = [0, 1500, 4000, 8000];
+const SEND_TIMEOUT_MS = 12_000;
 const CONTACTS_KEY = 'kavach-contacts';
 
 export function SosProvider({ children }) {
@@ -24,28 +37,90 @@ export function SosProvider({ children }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [status, setStatus] = useState(null);
+  const [activeSos, setActiveSos] = useState(null);
+  const [retryCount, setRetryCount] = useState(0);
+
   const [contacts, setContacts] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(CONTACTS_KEY) || 'null'); } catch { return null; }
+    try {
+      return JSON.parse(localStorage.getItem(CONTACTS_KEY) || 'null');
+    } catch {
+      return null;
+    }
   });
+
   const [voiceOn, setVoiceOnState] = useState(() => localStorage.getItem('kavach-voice') === 'on');
+  const [soundBeeps, setSoundBeepsState] = useState(() => localStorage.getItem('kavach-beeps') !== 'off');
+  const [keepAwake, setKeepAwakeState] = useState(() => localStorage.getItem('kavach-keep-awake') !== 'off');
 
   const sourceRef = useRef('button');
-  const deadline = useRef(0);
+  const transcriptRef = useRef('');
+  const clientIdRef = useRef(null);
+  const deadlineRef = useRef(0);
   const sendingRef = useRef(false);
+  const lastLocationSentRef = useRef({ lat: null, lng: null, at: 0 });
 
-  const refreshStatus = useCallback(() => api('/sos/status').then(setStatus).catch(() => {}), []);
-  const refreshContacts = useCallback(() => api('/me/contacts').then((d) => {
-    setContacts(d);
-    localStorage.setItem(CONTACTS_KEY, JSON.stringify(d));
-    return d;
-  }).catch(() => null), []);
+  const setVoiceOn = useCallback((on) => {
+    localStorage.setItem('kavach-voice', on ? 'on' : 'off');
+    setVoiceOnState(on);
+  }, []);
 
+  const setSoundBeeps = useCallback((on) => {
+    localStorage.setItem('kavach-beeps', on ? 'on' : 'off');
+    setSoundBeepsState(on);
+  }, []);
+
+  const setKeepAwake = useCallback((on) => {
+    localStorage.setItem('kavach-keep-awake', on ? 'on' : 'off');
+    setKeepAwakeState(on);
+  }, []);
+
+  // Fetch status and active alert
+  const refreshStatus = useCallback(() => {
+    if (!user) return Promise.resolve(null);
+    return api('/sos/status')
+      .then((d) => {
+        setStatus(d);
+        if (d.active) {
+          setActiveSos(d.active);
+        } else {
+          setActiveSos((prev) => (prev && !prev.resolved_at ? null : prev));
+        }
+        return d;
+      })
+      .catch(() => null);
+  }, [user]);
+
+  const refreshContacts = useCallback(() => {
+    if (!user) return Promise.resolve(null);
+    return api('/me/contacts')
+      .then((d) => {
+        setContacts(d);
+        localStorage.setItem(CONTACTS_KEY, JSON.stringify(d));
+        return d;
+      })
+      .catch(() => null);
+  }, [user]);
+
+  // Flush offline queue when online
   const flush = useCallback(async () => {
-    const n = await flushSosQueue((item) => api('/sos', {
-      method: 'POST',
-      body: { lat: item.lat ?? null, lng: item.lng ?? null, accuracy: item.accuracy ?? null, trigger: 'offline_sync', client_time: item.client_time },
-    }));
-    if (n) { toast.success(`${n} SOS alert${n > 1 ? 's' : ''} queued while offline ${n > 1 ? 'were' : 'was'} sent.`); refreshStatus(); }
+    const n = await flushSosQueue((item) =>
+      api('/sos', {
+        method: 'POST',
+        body: {
+          lat: item.lat ?? null,
+          lng: item.lng ?? null,
+          accuracy: item.accuracy ?? null,
+          trigger: 'offline_sync',
+          client_id: item.client_id,
+          client_time: item.client_time,
+          transcript: item.transcript || null,
+        },
+      }),
+    );
+    if (n) {
+      toast.success(`${n} offline SOS alert${n > 1 ? 's' : ''} sent.`);
+      refreshStatus();
+    }
   }, [refreshStatus, toast]);
 
   useEffect(() => {
@@ -57,85 +132,318 @@ export function SosProvider({ children }) {
     return () => window.removeEventListener('online', flush);
   }, [user, refreshStatus, refreshContacts, flush]);
 
-  const numbers = useMemo(() => [...(contacts?.contacts || []), ...(contacts?.system || [])].map((c) => c.phone), [contacts]);
+  // Poll for admin response while an SOS is active
+  useEffect(() => {
+    if (!activeSos || activeSos.resolved_at) return undefined;
+    const interval = setInterval(() => {
+      api(`/sos/${activeSos.id}`)
+        .then((s) => {
+          if (s) {
+            setActiveSos(s);
+            if (s.resolved_at) {
+              toast.info('Your SOS alert has been closed.');
+              setActiveSos(null);
+              setPhase((p) => (p === 'sent' ? 'idle' : p));
+            }
+          }
+        })
+        .catch(() => {});
+    }, 4500);
+    return () => clearInterval(interval);
+  }, [activeSos, toast]);
 
-  const smsText = useCallback((loc) => [
-    `SOS! ${user?.name || 'A student'}${user?.regd_no ? ` (${user.regd_no})` : ''} needs urgent help.`,
-    loc ? `Location: https://www.google.com/maps?q=${loc.lat.toFixed(6)},${loc.lng.toFixed(6)}` : 'Location unavailable.',
-    '- Kavach, BIT Sindri',
-  ].join('\n'), [user]);
+  // Live location sender loop
+  useEffect(() => {
+    if (!activeSos || activeSos.resolved_at || !user) return undefined;
 
+    const maybeSendLocation = async () => {
+      const loc = geo.coords;
+      if (!loc || !Number.isFinite(loc.lat) || !Number.isFinite(loc.lng)) return;
+
+      const last = lastLocationSentRef.current;
+      const now = Date.now();
+
+      // Send if > 15s elapsed OR moved > 25 meters
+      const elapsed = now - last.at;
+      let movedDistance = 0;
+      if (last.lat !== null && last.lng !== null) {
+        const dLat = (loc.lat - last.lat) * 111_000;
+        const dLng = (loc.lng - last.lng) * 111_000 * Math.cos((loc.lat * Math.PI) / 180);
+        movedDistance = Math.hypot(dLat, dLng);
+      }
+
+      if (elapsed >= SHARE_EVERY_MS || movedDistance >= 25) {
+        lastLocationSentRef.current = { lat: loc.lat, lng: loc.lng, at: now };
+        api(`/sos/${activeSos.id}/location`, {
+          method: 'POST',
+          body: { lat: loc.lat, lng: loc.lng, accuracy: loc.accuracy ?? null },
+        }).catch(() => {});
+      }
+    };
+
+    const locTimer = setInterval(maybeSendLocation, 5000);
+    return () => clearInterval(locTimer);
+  }, [activeSos, geo.coords, user]);
+
+  // VoiceGuard engine hook
+  const handleVoiceMatch = useCallback((match) => {
+    if (phase === 'idle') {
+      trigger('voice', match.transcript);
+    } else if (phase === 'countdown') {
+      if (match.mode === 'cancel') {
+        cancel();
+      }
+    }
+  }, [phase]);
+
+  const voiceGuard = useVoiceGuard({
+    enabled: Boolean(user) && voiceOn,
+    lang: 'en-IN',
+    fuzzy: true,
+    keepAwake,
+    onMatch: handleVoiceMatch,
+  });
+
+  // Switch VoiceGuard mode according to current SOS phase
+  useEffect(() => {
+    if (phase === 'countdown') {
+      voiceGuard.setMode('cancel');
+    } else {
+      voiceGuard.setMode('trigger');
+    }
+  }, [phase, voiceGuard]);
+
+  // Trigger countdown
+  const trigger = useCallback((source = 'button', heardText = '') => {
+    if (phase !== 'idle') return;
+    sourceRef.current = source;
+    transcriptRef.current = heardText;
+    clientIdRef.current = uuidv4();
+    deadlineRef.current = Date.now() + COUNTDOWN_MS;
+    setMsLeft(COUNTDOWN_MS);
+    setError(null);
+    setResult(null);
+    setRetryCount(0);
+    navigator.vibrate?.([200, 100, 200]);
+    setPhase('countdown');
+  }, [phase]);
+
+  // Countdown timer loop with sound beeps
+  useEffect(() => {
+    if (phase !== 'countdown') return undefined;
+
+    const lastSecRef = { current: Math.ceil(COUNTDOWN_MS / 1000) };
+
+    const t = setInterval(() => {
+      const left = deadlineRef.current - Date.now();
+      const clamped = Math.max(0, left);
+      setMsLeft(clamped);
+
+      const sec = Math.ceil(clamped / 1000);
+      if (sec !== lastSecRef.current && sec > 0) {
+        lastSecRef.current = sec;
+        if (soundBeeps) playCountdownTick(sec);
+        navigator.vibrate?.(60);
+      }
+
+      if (left <= 0) {
+        clearInterval(t);
+        send();
+      }
+    }, 150);
+
+    return () => clearInterval(t);
+  }, [phase, soundBeeps]);
+
+  // Cancel action
+  const cancel = useCallback(() => {
+    navigator.vibrate?.(0);
+    if (soundBeeps) playCancelTone();
+    setPhase('idle');
+  }, [soundBeeps]);
+
+  // Close overlay (minimizes to banner)
+  const close = useCallback(() => {
+    alarm.stop();
+    setPhase('idle');
+  }, [alarm]);
+
+  // Reopen overlay from banner
+  const reopenOverlay = useCallback(() => {
+    setPhase('sent');
+  }, []);
+
+  const numbers = useMemo(() => {
+    const list = [...(contacts?.contacts || []), ...(contacts?.system || [])];
+    return list.map((c) => c.phone);
+  }, [contacts]);
+
+  const smsText = useCallback(
+    (loc) =>
+      [
+        `SOS! ${user?.name || 'A student'}${user?.regd_no ? ` (${user.regd_no})` : ''} needs urgent help.`,
+        loc ? `Location: https://www.google.com/maps?q=${loc.lat.toFixed(6)},${loc.lng.toFixed(6)}` : 'Location unavailable.',
+        '- Kavach, BIT Sindri',
+      ].join('\n'),
+    [user],
+  );
+
+  // Send SOS with 4 retries & idempotency
   const send = useCallback(async () => {
     if (sendingRef.current) return;
     sendingRef.current = true;
     setPhase('sending');
     navigator.vibrate?.(0);
-    // Use a recent fix immediately; only wait (briefly) for GPS if the last one is stale.
+
+    const clientId = clientIdRef.current || uuidv4();
+    clientIdRef.current = clientId;
+
     const recent = geo.coords && Date.now() - geo.coords.at < 20_000;
     const loc = recent ? geo.coords : await geo.getFresh(4000);
-    const payload = { lat: loc?.lat ?? null, lng: loc?.lng ?? null, accuracy: loc?.accuracy ?? null, trigger: sourceRef.current };
-    const goOffline = () => {
-      enqueueSos({ ...payload, client_time: new Date().toISOString() });
-      setResult({ loc });
-      setPhase('offline');
+
+    const payload = {
+      lat: loc?.lat ?? null,
+      lng: loc?.lng ?? null,
+      accuracy: loc?.accuracy ?? null,
+      trigger: sourceRef.current,
+      client_id: clientId,
+      client_time: new Date().toISOString(),
+      transcript: transcriptRef.current || null,
     };
-    try {
-      if (!navigator.onLine) goOffline();
-      else {
-        const r = await api('/sos', { method: 'POST', body: payload });
+
+    const goOffline = () => {
+      enqueueSos(payload);
+      setResult({ loc, trigger: payload.trigger });
+      setPhase('offline');
+      sendingRef.current = false;
+    };
+
+    if (!navigator.onLine) {
+      goOffline();
+      return;
+    }
+
+    let success = false;
+    let lastErr = null;
+
+    for (let attempt = 0; attempt < RETRY_DELAYS.length; attempt += 1) {
+      if (attempt > 0) {
+        setRetryCount(attempt);
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setTimeout(r, RETRY_DELAYS[attempt]));
+      }
+
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS);
+
+        // eslint-disable-next-line no-await-in-loop
+        const r = await api('/sos', {
+          method: 'POST',
+          body: payload,
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeout);
+
         setResult({ ...r, loc });
-        setStatus((s) => ({ ...(s || {}), remaining: r.remaining, used: r.used, max: r.max, resets_at: r.resets_at }));
+        setActiveSos(r);
+        setStatus((s) => ({
+          ...(s || {}),
+          remaining: r.remaining,
+          used: r.used,
+          max: r.max,
+          resets_at: r.resets_at,
+        }));
         setPhase('sent');
+        if (soundBeeps) playSuccessChime();
         navigator.vibrate?.([80, 60, 80]);
         refreshStatus();
+        success = true;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (err.status === 429) {
+          // Rate limit reached - do not retry
+          break;
+        }
       }
-    } catch (e) {
-      if (e.status === 0) goOffline();
-      else { setError(e); setResult({ loc }); setPhase('error'); }
-    } finally {
-      sendingRef.current = false;
     }
-  }, [geo, refreshStatus]);
 
-  const phaseRef = useRef('idle');
-  useEffect(() => { phaseRef.current = phase; }, [phase]);
+    sendingRef.current = false;
 
-  const trigger = useCallback((source = 'button') => {
-    if (phaseRef.current !== 'idle') return;
-    phaseRef.current = 'countdown';
-    sourceRef.current = source;
-    deadline.current = Date.now() + COUNTDOWN_MS;
-    setMsLeft(COUNTDOWN_MS);
-    setError(null);
-    setResult(null);
-    navigator.vibrate?.([200, 100, 200]);
-    setPhase('countdown');
-  }, []);
+    if (!success) {
+      if (!navigator.onLine || lastErr?.name === 'AbortError' || lastErr?.status === 0) {
+        goOffline();
+      } else {
+        setError(lastErr);
+        setResult({ loc });
+        setPhase('error');
+      }
+    }
+  }, [geo, soundBeeps, refreshStatus]);
 
-  useEffect(() => {
-    if (phase !== 'countdown') return undefined;
-    const t = setInterval(() => {
-      const left = deadline.current - Date.now();
-      setMsLeft(Math.max(0, left));
-      if (left <= 0) { clearInterval(t); send(); }
-      else if (Math.ceil(left / 1000) !== Math.ceil((left + 200) / 1000)) navigator.vibrate?.(60);
-    }, 200);
-    return () => clearInterval(t);
-  }, [phase, send]);
+  // Mark safe action
+  const markSafe = useCallback(async (note = '') => {
+    if (!activeSos) return;
+    try {
+      await api(`/sos/${activeSos.id}/safe`, {
+        method: 'POST',
+        body: { note: note || null },
+      });
+      toast.success('Marked as safe. Contacts have been updated.');
+      setActiveSos(null);
+      setPhase('idle');
+      refreshStatus();
+    } catch (e) {
+      toast.error(e.message || 'Failed to update status');
+    }
+  }, [activeSos, toast, refreshStatus]);
 
-  const cancel = useCallback(() => { navigator.vibrate?.(0); setPhase('idle'); }, []);
-  const close = useCallback(() => { alarm.stop(); setPhase('idle'); }, [alarm]);
-
-  const setVoiceOn = useCallback((on) => {
-    localStorage.setItem('kavach-voice', on ? 'on' : 'off');
-    setVoiceOnState(on);
-  }, []);
-  const voice = useVoiceTrigger(Boolean(user) && voiceOn && phase === 'idle', () => trigger('voice'));
-
-  const value = useMemo(() => ({
-    phase, trigger, cancel, status, refreshStatus, contacts, setContacts: (d) => { setContacts(d); localStorage.setItem(CONTACTS_KEY, JSON.stringify(d)); },
-    refreshContacts, voiceOn, setVoiceOn, voice,
-  }), [phase, trigger, cancel, status, refreshStatus, contacts, refreshContacts, voiceOn, setVoiceOn, voice]);
+  const value = useMemo(
+    () => ({
+      phase,
+      trigger,
+      cancel,
+      status,
+      activeSos,
+      refreshStatus,
+      contacts,
+      setContacts: (d) => {
+        setContacts(d);
+        localStorage.setItem(CONTACTS_KEY, JSON.stringify(d));
+      },
+      refreshContacts,
+      voiceOn,
+      setVoiceOn,
+      voiceGuard,
+      soundBeeps,
+      setSoundBeeps,
+      keepAwake,
+      setKeepAwake,
+      markSafe,
+      reopenOverlay,
+    }),
+    [
+      phase,
+      trigger,
+      cancel,
+      status,
+      activeSos,
+      refreshStatus,
+      contacts,
+      refreshContacts,
+      voiceOn,
+      setVoiceOn,
+      voiceGuard,
+      soundBeeps,
+      setSoundBeeps,
+      keepAwake,
+      setKeepAwake,
+      markSafe,
+      reopenOverlay,
+    ],
+  );
 
   return (
     <SosCtx.Provider value={value}>
@@ -145,15 +453,22 @@ export function SosProvider({ children }) {
           phase={phase}
           msLeft={msLeft}
           source={sourceRef.current}
+          transcript={transcriptRef.current}
           result={result}
           error={error}
           status={status}
+          activeSos={activeSos}
           numbers={numbers}
           smsHref={numbers.length ? smsLink(numbers, smsText(result?.loc || geo.coords)) : null}
           alarm={alarm}
+          retryCount={retryCount}
+          voiceMode={voiceGuard?.mode}
           onCancel={cancel}
-          onSendNow={() => { deadline.current = Date.now(); }}
+          onSendNow={() => {
+            deadlineRef.current = Date.now();
+          }}
           onClose={close}
+          onMarkSafe={markSafe}
         />
       )}
     </SosCtx.Provider>
@@ -161,115 +476,3 @@ export function SosProvider({ children }) {
 }
 
 export const useSos = () => useContext(SosCtx);
-
-/* ───────────────────────── Overlay ───────────────────────── */
-
-function SosOverlay({ phase, msLeft, source, result, error, status, numbers, smsHref, alarm, onCancel, onSendNow, onClose }) {
-  const cancelRef = useRef(null);
-  useEffect(() => { cancelRef.current?.focus(); }, [phase]);
-  useEffect(() => {
-    const onKey = (e) => { if (e.key === 'Escape' && phase === 'countdown') onCancel(); };
-    document.addEventListener('keydown', onKey);
-    document.body.style.overflow = 'hidden';
-    return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = ''; };
-  }, [phase, onCancel]);
-
-  const seconds = Math.ceil(msLeft / 1000);
-  const R = 92;
-  const C = 2 * Math.PI * R;
-  const frac = msLeft / COUNTDOWN_MS;
-
-  return (
-    <div role="alertdialog" aria-modal="true" aria-labelledby="sos-title" aria-describedby="sos-desc"
-      className={`fixed inset-0 z-[1100] flex flex-col items-center justify-center overflow-y-auto px-6 py-10 text-white ${phase === 'sent' ? 'bg-[#0f3d2f]' : 'bg-[#4a0b14]'}`}>
-      {(phase === 'countdown' || phase === 'sending') && (
-        <div className="flex w-full max-w-sm flex-col items-center text-center">
-          <p className="mb-2 flex items-center gap-2 text-sm font-bold text-white/80">
-            <BellRing className="h-4 w-4" aria-hidden /> {source === 'voice' ? 'Voice trigger heard "help"' : 'SOS button pressed'}
-          </p>
-          <h2 id="sos-title" className="font-display text-3xl font-extrabold">
-            {phase === 'sending' ? 'Sending your SOS…' : 'Sending SOS in'}
-          </h2>
-          <div className="relative my-8 h-56 w-56">
-            <svg viewBox="0 0 200 200" className="h-full w-full -rotate-90" aria-hidden>
-              <circle cx="100" cy="100" r={R} fill="none" stroke="rgb(255 255 255 / 0.15)" strokeWidth="10" />
-              <circle cx="100" cy="100" r={R} fill="none" stroke="#ff5464" strokeWidth="10" strokeLinecap="round"
-                strokeDasharray={C} strokeDashoffset={C * (1 - frac)} style={{ transition: 'stroke-dashoffset 0.2s linear' }} />
-            </svg>
-            <div className="absolute inset-0 flex items-center justify-center">
-              {phase === 'sending'
-                ? <span className="h-12 w-12 animate-spin rounded-full border-4 border-white/30 border-t-white" aria-label="Sending" />
-                : <span className="font-display text-8xl font-extrabold tabular-nums" aria-live="assertive">{seconds}</span>}
-            </div>
-          </div>
-          <p id="sos-desc" className="mb-8 text-white/80">
-            Your live location will go by SMS to {numbers.length || 'your'} emergency contact{numbers.length === 1 ? '' : 's'}, including the campus admin.
-          </p>
-          {phase === 'countdown' && (
-            <div className="flex w-full flex-col gap-3">
-              <button ref={cancelRef} type="button" onClick={onCancel}
-                className="flex h-16 w-full items-center justify-center gap-2 rounded-panel bg-white text-xl font-extrabold text-[#4a0b14] hover:bg-white/90">
-                <X className="h-6 w-6" aria-hidden /> Cancel — I'm safe
-              </button>
-              <button type="button" onClick={onSendNow} className="h-12 w-full rounded-panel border border-white/40 font-bold hover:bg-white/10">
-                Send now
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {phase === 'sent' && (
-        <div className="flex w-full max-w-md flex-col items-center text-center">
-          <span className="mb-5 flex h-20 w-20 items-center justify-center rounded-full bg-white text-[#0f3d2f]"><Check className="h-11 w-11" strokeWidth={3} /></span>
-          <h2 id="sos-title" className="font-display text-3xl font-extrabold">SOS sent</h2>
-          <p id="sos-desc" className="mt-2 text-white/85">
-            {result?.delivery_mode === 'console'
-              ? 'Your alert reached the Kavach server. SMS delivery is not configured yet, so the messages were printed in the server terminal.'
-              : 'Your contacts have your location. Stay where you are if it is safe, and keep your phone with you.'}
-          </p>
-          {!result?.maps_url && <p className="mt-3 rounded-control bg-white/10 px-3 py-2 text-sm">Your location was unavailable, so the alert was sent without a map link.</p>}
-          <ul className="mt-6 w-full divide-y divide-white/10 rounded-panel bg-white/10 text-left">
-            {(result?.recipients || []).map((r) => (
-              <li key={r.phone + r.name} className="flex items-center justify-between gap-3 px-4 py-3">
-                <span><span className="block font-bold">{r.name}</span><span className="text-sm text-white/70">{r.phone}</span></span>
-                <span className="text-sm font-bold">{r.error ? 'Failed' : r.delivered ? 'Delivered' : 'Logged'}</span>
-              </li>
-            ))}
-          </ul>
-          {status && <p className="mt-3 text-sm text-white/70">{status.remaining} of {status.max} alerts left this hour.</p>}
-          <div className="mt-6 grid w-full grid-cols-2 gap-3">
-            <button type="button" onClick={alarm.toggle} className="flex h-12 items-center justify-center gap-2 rounded-panel border border-white/40 font-bold hover:bg-white/10">
-              {alarm.on ? <VolumeX className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />} {alarm.on ? 'Stop alarm' : 'Sound alarm'}
-            </button>
-            <a href="tel:112" className="flex h-12 items-center justify-center gap-2 rounded-panel border border-white/40 font-bold hover:bg-white/10"><Phone className="h-5 w-5" /> Call 112</a>
-          </div>
-          <button ref={cancelRef} type="button" onClick={onClose} className="mt-3 h-12 w-full rounded-panel bg-white font-extrabold text-[#0f3d2f] hover:bg-white/90">Done</button>
-        </div>
-      )}
-
-      {(phase === 'offline' || phase === 'error') && (
-        <div className="flex w-full max-w-md flex-col items-center text-center">
-          <span className="mb-5 flex h-20 w-20 items-center justify-center rounded-full bg-white/15">
-            {phase === 'offline' ? <WifiOff className="h-10 w-10" /> : <AlertTriangle className="h-10 w-10" />}
-          </span>
-          <h2 id="sos-title" className="font-display text-3xl font-extrabold">{phase === 'offline' ? 'You are offline' : 'SOS not sent'}</h2>
-          <p id="sos-desc" className="mt-2 text-white/85">
-            {phase === 'offline'
-              ? 'Send the alert from your phone\'s SMS app now. We have also queued it and will send it automatically when you reconnect.'
-              : error?.message}
-          </p>
-          <div className="mt-6 flex w-full flex-col gap-3">
-            {smsHref && (
-              <a href={smsHref} className="flex h-14 items-center justify-center gap-2 rounded-panel bg-white text-lg font-extrabold text-[#4a0b14] hover:bg-white/90">
-                <MessageSquare className="h-5 w-5" /> Send by SMS app
-              </a>
-            )}
-            <a href="tel:112" className="flex h-12 items-center justify-center gap-2 rounded-panel border border-white/40 font-bold hover:bg-white/10"><Phone className="h-5 w-5" /> Call 112</a>
-            <Button ref={cancelRef} variant="ghost" onClick={onClose} className="h-12 text-white hover:bg-white/10">Close</Button>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}

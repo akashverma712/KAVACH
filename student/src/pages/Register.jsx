@@ -105,6 +105,13 @@ export default function Register() {
     >
       {step === 'details' && (
         <form onSubmit={start} className="space-y-4" noValidate>
+          {import.meta.env.DEV && (
+            <button type="button" onClick={() => { setForm({ name: 'Dev Bypass User', email: '', phone: '9998887776', password: 'DevPass1', confirm: 'DevPass1' }); setErrors({}); }}
+              className="w-full rounded-control border border-brass/40 bg-brass/10 px-3.5 py-2.5 text-left text-xs text-ink transition-colors hover:bg-brass/15">
+              <span className="font-black text-brass">🔧 Dev Bypass</span>
+              <span className="ml-1 text-muted">— Tap to auto-fill · Phone: <code className="font-mono text-ink">9998887776</code> · OTP: <code className="font-mono text-ink">123456</code></span>
+            </button>
+          )}
           <Input label="Full name" icon={UserRound} value={form.name} onChange={set('name')} error={errors.name} autoComplete="name" autoFocus />
           <div>
             <Input label="College email" icon={Mail} type="email" inputMode="email" placeholder={`yourname@${DOMAIN}`} value={form.email}

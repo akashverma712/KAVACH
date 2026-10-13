@@ -66,6 +66,13 @@ export default function Login() {
           <h1 className="mt-5 text-2xl font-extrabold">{session ? 'Check your email' : 'Admin sign in'}</h1>
           {!session ? (
             <form onSubmit={start} className="mt-6 space-y-4" noValidate>
+              {import.meta.env.DEV && (
+                <button type="button" onClick={() => { setEmail('dev@bitsindri.ac.in'); setError(null); }}
+                  className="w-full rounded-lg border border-amber-400/50 bg-amber-50 px-3 py-2.5 text-left text-sm dark:border-amber-500/30 dark:bg-amber-950/40">
+                  <span className="font-bold text-amber-700 dark:text-amber-400">🔧 Dev Bypass</span>
+                  <span className="ml-1 text-amber-600 dark:text-amber-300">— Tap to auto-fill · Email: <code>dev@bitsindri.ac.in</code> · OTP: <code>123456</code></span>
+                </button>
+              )}
               <p className="text-muted">We’ll email a one-time code to the admin address.</p>
               <Input label="Admin email" icon={Mail} type="email" value={email} onChange={(e) => { setEmail(e.target.value); setError(null); }} autoComplete="email" autoFocus />
               {error && <p className="text-sm font-bold text-signal" role="alert">{error}</p>}

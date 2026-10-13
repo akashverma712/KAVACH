@@ -22,7 +22,14 @@ export default function Login() {
   const [session, setSession] = useState(null);
   const [sendingChannel, setSendingChannel] = useState(null);
 
+  const isDev = import.meta.env.DEV;
+
   const set = (k) => (e) => { setForm((f) => ({ ...f, [k]: e.target.value })); setErrors({}); };
+
+  const fillDevBypass = () => {
+    setForm({ identifier: '9998887776', password: 'DevPass1' });
+    setErrors({});
+  };
 
   const start = async (e) => {
     e.preventDefault();
@@ -72,6 +79,13 @@ export default function Login() {
     >
       {step === 'credentials' && (
         <form onSubmit={start} className="space-y-4" noValidate>
+          {isDev && (
+            <button type="button" onClick={fillDevBypass}
+              className="w-full rounded-control border border-brass/40 bg-brass/10 px-3.5 py-2.5 text-left text-xs text-ink transition-colors hover:bg-brass/15">
+              <span className="font-black text-brass">🔧 Dev Bypass</span>
+              <span className="ml-1 text-muted">— Tap to auto-fill · Phone: <code className="font-mono text-ink">9998887776</code> · OTP: <code className="font-mono text-ink">123456</code></span>
+            </button>
+          )}
           <Input label="Name, email or phone" icon={AtSign} value={form.identifier} onChange={set('identifier')} error={errors.identifier} autoComplete="username" autoFocus />
           <PasswordInput label="Password" value={form.password} onChange={set('password')} error={errors.password} autoComplete="current-password" />
           {errors.form && <p className="rounded-control bg-signal/10 px-3 py-2.5 text-sm font-bold text-signal" role="alert">{errors.form}</p>}

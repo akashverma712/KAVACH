@@ -122,7 +122,7 @@ export default function Dashboard() {
         </section>
         <section className="panel">
           <div className="flex items-center justify-between border-b border-line px-5 py-3.5">
-            <h2 className="font-bold">Most urgent problems</h2>
+            <h2 className="font-bold">Top priority problems</h2>
             <Link to="/problems" className="flex items-center text-sm font-bold text-muted hover:text-ink">All <ChevronRight className="h-4 w-4" /></Link>
           </div>
           <ul className="divide-y divide-line">
@@ -131,7 +131,15 @@ export default function Dashboard() {
               <li key={p.id}>
                 <Link to={`/problems?open=${p.id}`} className="flex items-center gap-3 px-5 py-3 hover:bg-raised">
                   <span className={`h-9 w-1 shrink-0 rounded-full ${SEVERITY[p.severity].bar}`} />
-                  <span className="min-w-0 flex-1"><span className="block truncate font-bold">{p.title}</span><span className="text-sm text-muted">{STATUS[p.status].label}, {timeAgo(p.created_at)}</span></span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center justify-between gap-2">
+                      <span className="block truncate font-bold">{p.title}</span>
+                      {p.priority_score !== undefined && (
+                        <span className="shrink-0 text-xs font-bold tabular-nums text-muted">Score {p.priority_score}</span>
+                      )}
+                    </span>
+                    <span className="text-sm text-muted">{STATUS[p.status].label}, {timeAgo(p.created_at)}</span>
+                  </span>
                 </Link>
               </li>
             ))}

@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { env } from '../config/env.js';
 import { pool, query } from './pool.js';
 import { normalizePhone } from '../utils/phone.js';
+import { seedCommunity } from './seedCommunity.js';
+import { seedFundraisers } from './seedFundraisers.js';
 
 const DEMO_ROSTER = [
   { name: 'Aarav Kumar', branch: 'Computer Science & Engineering', batch: '2022-2026', regd_no: '22CSE001', email: 'aarav.22cse001@bitsindri.ac.in', phone: '9000000001' },
@@ -92,6 +94,10 @@ export async function seed({ quiet = false } = {}) {
     }
     log(`✔ Seeded ${FAQS.length} chatbot answers`);
   }
+
+  await seedCommunity({ quiet });
+  await seedFundraisers({ quiet });
+
   log(`✔ Admin ready: ${env.admin.email}`);
 }
 

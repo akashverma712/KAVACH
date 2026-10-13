@@ -15,7 +15,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kavach_dev_password}
       POSTGRES_DB: kavach
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - "${DB_PORT:-5433}:5432"
     volumes:
       - kavach_pgdata:/var/lib/postgresql/data
     healthcheck:

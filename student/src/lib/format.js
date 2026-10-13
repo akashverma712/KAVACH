@@ -27,7 +27,7 @@ export const SEVERITY = {
 export const STATUS = {
   open: { label: 'Open', tone: 'muted' },
   marked_for_solving: { label: 'Marked for solving', tone: 'brass' },
-  in_progress: { label: 'In progress', tone: 'ink' },
+  in_progress: { label: 'In progress', tone: 'glacial' },
   under_review: { label: 'Under review', tone: 'brass' },
   solved: { label: 'Solved', tone: 'neem' },
   closed: { label: 'Closed', tone: 'muted' },

@@ -50,7 +50,7 @@ export default function Chatbot() {
 
   return (
     <div>
-      <PageHeader title="Chatbot answers" actions={<Button onClick={() => open(null)}><Plus className="h-4 w-4" /> Add answer</Button>}>
+      <PageHeader title="FAQ" actions={<Button onClick={() => open(null)}><Plus className="h-4 w-4" /> Add answer</Button>}>
         The campus assistant answers students from these entries. Keywords help it match different ways of asking the same thing.
       </PageHeader>
 

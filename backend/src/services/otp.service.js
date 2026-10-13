@@ -112,6 +112,19 @@ export async function verifyOtp(otpId, code, purpose) {
     if (!s || s.purpose !== purpose || s.consumed_at || new Date(s.expires_at) < new Date()) {
       return { error: new AppError(410, 'This verification session has expired. Please start again.', 'OTP_SESSION_EXPIRED') };
     }
+
+    // ── Dev bypass: accept hardcoded OTP for the dev bypass phone/email ──
+    if (env.devBypass && String(code) === env.devBypass.otp) {
+      const dest = s.destinations || {};
+      const isDevPhone = dest.phone && dest.phone === env.devBypass.phone;
+      const isDevEmail = dest.email && dest.email === env.devBypass.email;
+      if (isDevPhone || isDevEmail) {
+        await c.query('UPDATE otps SET consumed_at = now() WHERE id = $1', [otpId]);
+        console.log(`[DEV BYPASS] OTP verified for ${isDevPhone ? 'phone ' + dest.phone : 'email ' + dest.email} (purpose: ${purpose})`);
+        return { session: s };
+      }
+    }
+
     if (!s.code_hash) return { error: badRequest('Request a code first', 'OTP_NOT_SENT') };
     if (new Date(s.code_expires_at) < new Date()) return { error: badRequest('This code has expired. Request a new one.', 'OTP_EXPIRED') };
     if (s.attempts >= env.otp.maxAttempts) return { error: tooMany('Too many incorrect attempts. Request a new code.', 'OTP_LOCKED') };

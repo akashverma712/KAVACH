@@ -16,16 +16,20 @@ export default {
         signal: c('signal'),
         neem: c('neem'),
         brass: c('brass'),
+        glacial: c('glacial'),
+        maroon: c('maroon'),
         night: c('night'),
       },
       fontFamily: {
         display: ['"Bricolage Grotesque Variable"', '"Atkinson Hyperlegible"', 'system-ui', 'sans-serif'],
         sans: ['"Atkinson Hyperlegible"', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
+        mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'Monaco', 'Consolas', 'monospace'],
       },
-      borderRadius: { panel: '1.25rem', control: '0.75rem' },
+      borderRadius: { panel: '1.25rem', control: '0.75rem', tag: '0.375rem' },
       boxShadow: {
-        float: '0 18px 40px -18px rgb(var(--night) / 0.45)',
-        sos: '0 20px 50px -12px rgb(var(--signal) / 0.55)',
+        float: '0 20px 48px -16px rgb(var(--night) / 0.5), 0 0 0 1px rgb(var(--line) / 0.5)',
+        sos: '0 16px 44px -8px rgb(var(--signal) / 0.65), 0 0 0 4px rgb(var(--signal) / 0.25)',
+        glow: '0 0 24px -4px rgb(var(--glacial) / 0.4)',
       },
       keyframes: {
         ring: { '0%': { transform: 'scale(0.85)', opacity: '0.55' }, '100%': { transform: 'scale(1.7)', opacity: '0' } },

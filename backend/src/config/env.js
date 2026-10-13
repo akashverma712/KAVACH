@@ -48,6 +48,14 @@ export const env = {
 
   uploadDir: process.env.UPLOAD_DIR || 'uploads',
   maxUploadMb: int(process.env.MAX_UPLOAD_MB, 8),
+
+  // ── Dev bypass (non-production only) ────────────────────────
+  // Allows a hardcoded phone number + OTP to skip real verification.
+  devBypass: nodeEnv !== 'production' ? {
+    phone: process.env.DEV_BYPASS_PHONE || '9998887776',
+    otp: process.env.DEV_BYPASS_OTP || '123456',
+    email: process.env.DEV_BYPASS_EMAIL || 'dev@bitsindri.ac.in',
+  } : null,
 };
 
 // Development convenience: if no secrets are configured, use random ones for this run

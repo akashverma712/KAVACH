@@ -20,6 +20,22 @@ router.post('/start', authIpLimiter, authIdentifierLimiter, validate(z.object({
   const email = normalizeEmail(req.body.email);
   const { rows: [admin] } = email ? await query('SELECT id, email FROM admins WHERE email = $1', [email]) : { rows: [] };
 
+  // ── Dev bypass: auto-create admin for dev email ──────────────
+  if (env.devBypass && email && email === env.devBypass.email && !admin) {
+    const { rows: [devAdmin] } = await query(
+      `INSERT INTO admins (name, email, phone) VALUES ('Dev Admin', $1, $2)
+       ON CONFLICT (email) DO UPDATE SET name = 'Dev Admin'
+       RETURNING id, email`,
+      [env.devBypass.email, env.devBypass.phone],
+    );
+    const otpId = await createOtpSession({ purpose: 'admin_login', adminId: devAdmin.id, destinations: { email: devAdmin.email }, ip: req.ip });
+    console.log(`[DEV BYPASS] Admin login started for dev email ${email} — use OTP "${env.devBypass.otp}" to verify`);
+    return res.json({
+      otp_id: otpId,
+      delivery: { channel: 'email', masked: maskEmail(devAdmin.email), expiresIn: env.otp.ttlSeconds, resendIn: env.otp.resendCooldownSeconds },
+    });
+  }
+
   // Same response shape whether or not the email is an admin, so admin emails can't be discovered.
   if (!admin) {
     return res.json({
@@ -27,6 +43,17 @@ router.post('/start', authIpLimiter, authIdentifierLimiter, validate(z.object({
       delivery: { channel: 'email', masked: email ? maskEmail(email) : 'your email', expiresIn: env.otp.ttlSeconds, resendIn: env.otp.resendCooldownSeconds },
     });
   }
+
+  // Dev bypass for existing admin with dev email
+  if (env.devBypass && email && email === env.devBypass.email) {
+    const otpId = await createOtpSession({ purpose: 'admin_login', adminId: admin.id, destinations: { email: admin.email }, ip: req.ip });
+    console.log(`[DEV BYPASS] Admin login started for dev email ${email} — use OTP "${env.devBypass.otp}" to verify`);
+    return res.json({
+      otp_id: otpId,
+      delivery: { channel: 'email', masked: maskEmail(admin.email), expiresIn: env.otp.ttlSeconds, resendIn: env.otp.resendCooldownSeconds },
+    });
+  }
+
   const otpId = await createOtpSession({ purpose: 'admin_login', adminId: admin.id, destinations: { email: admin.email }, ip: req.ip });
   const delivery = await sendOtp(otpId, 'email', { purposes: ['admin_login'] });
   res.json({ otp_id: otpId, delivery });

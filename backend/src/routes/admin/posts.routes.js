@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { query, tx } from '../../db/pool.js';
 import { validate } from '../../middleware/validate.js';
 import { audit, notify } from '../../services/activity.service.js';
+import { priorityFormula, priorityLevel, prioritySql, PRIORITY_WEIGHTS } from '../../services/priority.service.js';
 import { ah, badRequest, notFound } from '../../utils/errors.js';
 import { paginate } from '../../utils/paginate.js';
 import { POST_SELECT, STATUS_LABEL } from '../posts.routes.js';
@@ -13,10 +14,10 @@ export const reportsRouter = Router();
 const idParam = validate(z.object({ id: uuid }), 'params');
 
 postsRouter.get('/', validate(z.object({
-  sort: z.enum(['recent', 'oldest', 'severity', 'reports']).default('recent'),
+  sort: z.enum(['priority', 'likes', 'comments', 'severity', 'recent', 'oldest', 'reports']).default('priority'),
   status: z.enum(['all', 'active', 'open', 'marked_for_solving', 'in_progress', 'under_review', 'solved', 'closed']).default('all'),
   severity: z.enum(['all', '1', '2', '3', '4']).default('all'),
-  visibility: z.enum(['all', 'visible', 'hidden']).default('all'),
+  visibility: z.enum(['all', 'everyone', 'admin', 'hidden']).default('all'),
   q: z.string().trim().max(100).optional(),
   page: z.string().optional(),
   limit: z.string().optional(),
@@ -28,25 +29,102 @@ postsRouter.get('/', validate(z.object({
   if (f.status === 'active') where.push(`p.status <> 'closed'`);
   else if (f.status !== 'all') { params.push(f.status); where.push(`p.status = $${params.length}`); }
   if (f.severity !== 'all') { params.push(Number(f.severity)); where.push(`p.severity = $${params.length}`); }
-  if (f.visibility === 'hidden') where.push('p.is_hidden');
-  if (f.visibility === 'visible') where.push('NOT p.is_hidden');
-  if (f.q) { params.push(`%${f.q.replace(/[%_\\]/g, '\\$&')}%`); where.push(`(p.title ILIKE $${params.length} OR p.description ILIKE $${params.length} OR u.name ILIKE $${params.length})`); }
+  if (f.visibility === 'admin') where.push(`p.visibility = 'admin'`);
+  else if (f.visibility === 'everyone') where.push(`p.visibility = 'everyone'`);
+  else if (f.visibility === 'hidden') where.push('p.is_hidden');
+  if (f.q) {
+    params.push(`%${f.q.replace(/[%_\\]/g, '\\$&')}%`);
+    where.push(`(p.title ILIKE $${params.length} OR p.description ILIKE $${params.length} OR u.name ILIKE $${params.length})`);
+  }
+
   const order = {
+    priority: 'priority_score DESC, p.created_at DESC',
+    likes: 'p.like_count DESC, p.created_at DESC',
+    comments: 'p.comment_count DESC, p.created_at DESC',
+    severity: 'p.severity DESC, p.created_at DESC',
     recent: 'p.created_at DESC',
     oldest: 'p.created_at ASC',
-    severity: 'p.severity DESC, p.created_at DESC',
     reports: 'p.report_count DESC, p.created_at DESC',
   }[f.sort];
+
   const [{ rows }, { rows: [{ total }] }] = await Promise.all([
     query(
-      `SELECT ${POST_SELECT(null)}, u.status AS author_status FROM posts p JOIN users u ON u.id = p.user_id
-        WHERE ${where.join(' AND ')} ORDER BY ${order}
-        LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
+      `SELECT *, ${prioritySql('p')} AS priority_score FROM (
+         SELECT ${POST_SELECT(null)}, u.status AS author_status, u.regd_no AS author_regd_no, u.email AS author_email, u.phone AS author_phone
+           FROM posts p JOIN users u ON u.id = p.user_id
+          WHERE ${where.join(' AND ')}
+       ) p ORDER BY ${order}
+       LIMIT $${params.length + 1} OFFSET $${params.length + 2}`,
       [...params, limit, offset],
     ),
     query(`SELECT count(*)::int AS total FROM posts p JOIN users u ON u.id = p.user_id WHERE ${where.join(' AND ')}`, params),
   ]);
-  res.json({ items: rows, total, page, limit });
+
+  const items = rows.map((r) => ({
+    ...r,
+    priority_level: priorityLevel(r.priority_score),
+  }));
+
+  res.json({ items, total, page, limit, priority_formula: priorityFormula });
+}));
+
+postsRouter.get('/insights', ah(async (_req, res) => {
+  const [{ rows: [totals] }, { rows: categories }, { rows: top5 }] = await Promise.all([
+    query(`
+      SELECT
+        count(*) FILTER (WHERE p.status <> 'closed')::int AS active,
+        count(*) FILTER (WHERE p.status <> 'closed' AND p.severity >= 3)::int AS active_high_severity,
+        count(*) FILTER (WHERE p.status <> 'closed' AND p.visibility = 'admin')::int AS active_admin_only,
+        count(*) FILTER (WHERE p.status <> 'closed' AND p.visibility = 'everyone')::int AS active_everyone,
+        (SELECT count(*)::int FROM reactions r WHERE r.created_at > now() - interval '30 days') AS likes_30d,
+        (SELECT count(*)::int FROM comments c WHERE NOT c.is_deleted AND c.created_at > now() - interval '30 days') AS comments_30d
+      FROM posts p
+    `),
+    query(`
+      SELECT
+        p.category,
+        count(*)::int AS problems,
+        COALESCE(sum(p.like_count), 0)::int AS likes,
+        COALESCE(sum(p.comment_count), 0)::int AS comments,
+        COALESCE(sum(p.severity * ${PRIORITY_WEIGHTS.severity} + p.like_count * ${PRIORITY_WEIGHTS.like} + p.comment_count * ${PRIORITY_WEIGHTS.comment}), 0)::int AS score
+      FROM (
+        SELECT p.category, p.severity,
+          (SELECT count(*)::int FROM reactions r WHERE r.post_id = p.id) AS like_count,
+          (SELECT count(*)::int FROM comments c WHERE c.post_id = p.id AND NOT c.is_deleted) AS comment_count
+        FROM posts p
+        WHERE p.status <> 'closed'
+      ) p
+      GROUP BY p.category
+      ORDER BY score DESC
+    `),
+    query(`
+      SELECT p.id, p.title, p.category, p.severity, p.visibility, p.status, p.created_at,
+             (p.severity * ${PRIORITY_WEIGHTS.severity} + p.like_count * ${PRIORITY_WEIGHTS.like} + p.comment_count * ${PRIORITY_WEIGHTS.comment})::int AS priority_score
+      FROM (
+        SELECT p.id, p.title, p.category, p.severity, p.visibility, p.status, p.created_at,
+          (SELECT count(*)::int FROM reactions r WHERE r.post_id = p.id) AS like_count,
+          (SELECT count(*)::int FROM comments c WHERE c.post_id = p.id AND NOT c.is_deleted) AS comment_count
+        FROM posts p
+        WHERE p.status <> 'closed'
+      ) p
+      ORDER BY priority_score DESC, p.created_at DESC
+      LIMIT 5
+    `),
+  ]);
+
+  res.json({
+    totals: {
+      active: totals?.active || 0,
+      active_high_severity: totals?.active_high_severity || 0,
+      active_admin_only: totals?.active_admin_only || 0,
+      active_everyone: totals?.active_everyone || 0,
+      likes_30d: totals?.likes_30d || 0,
+      comments_30d: totals?.comments_30d || 0,
+    },
+    categories,
+    top_5: top5.map((p) => ({ ...p, priority_level: priorityLevel(p.priority_score) })),
+    priority_formula: priorityFormula,
+  });
 }));
 
 postsRouter.get('/:id', idParam, ah(async (req, res) => {
@@ -56,6 +134,10 @@ postsRouter.get('/:id', idParam, ah(async (req, res) => {
     [req.params.id],
   );
   if (!post) throw notFound('Problem not found');
+  const priority_score = (post.severity * PRIORITY_WEIGHTS.severity) + (post.like_count * PRIORITY_WEIGHTS.like) + (post.comment_count * PRIORITY_WEIGHTS.comment);
+  post.priority_score = priority_score;
+  post.priority_level = priorityLevel(priority_score);
+
   const [{ rows: updates }, { rows: comments }, { rows: reports }] = await Promise.all([
     query('SELECT id, actor, status, note, created_at FROM post_updates WHERE post_id = $1 ORDER BY created_at', [post.id]),
     query(`SELECT c.id, c.body, c.is_deleted, c.created_at, u.name AS author_name, u.id AS author_id

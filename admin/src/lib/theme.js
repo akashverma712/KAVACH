@@ -6,7 +6,7 @@ export const getThemePref = () => localStorage.getItem(KEY) || 'system';
 export function applyTheme(pref = getThemePref()) {
   const dark = pref === 'dark' || (pref === 'system' && media().matches);
   document.documentElement.classList.toggle('dark', dark);
-  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#0D1628' : '#13213C');
+  document.querySelector('meta[name="theme-color"]')?.setAttribute('content', dark ? '#000000' : '#F5F5F7');
   return dark;
 }
 

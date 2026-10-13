@@ -3,6 +3,7 @@ import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import Layout from './components/Layout';
 import { PageLoader } from './components/ui';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { SosAlertProvider } from './context/SosAlertContext';
 import { ToastProvider, useToast } from './context/ToastContext';
 import Login from './pages/Login';
 
@@ -41,23 +42,25 @@ export default function App() {
     <ToastProvider>
       <AuthProvider>
         <Notice />
-        <Suspense fallback={<PageLoader />}>
-          <Routes>
-            <Route path="/login" element={<LoginRoute />} />
-            <Route element={<RequireAdmin><Layout /></RequireAdmin>}>
-              <Route index element={<Dashboard />} />
-              <Route path="sos" element={<SosAlerts />} />
-              <Route path="problems" element={<Problems />} />
-              <Route path="reports" element={<Reports />} />
-              <Route path="fundraisers" element={<Fundraisers />} />
-              <Route path="students" element={<Students />} />
-              <Route path="users" element={<Users />} />
-              <Route path="chatbot" element={<Chatbot />} />
-              <Route path="settings" element={<Settings />} />
-            </Route>
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </Suspense>
+        <SosAlertProvider>
+          <Suspense fallback={<PageLoader />}>
+            <Routes>
+              <Route path="/login" element={<LoginRoute />} />
+              <Route element={<RequireAdmin><Layout /></RequireAdmin>}>
+                <Route index element={<Dashboard />} />
+                <Route path="sos" element={<SosAlerts />} />
+                <Route path="problems" element={<Problems />} />
+                <Route path="reports" element={<Reports />} />
+                <Route path="fundraisers" element={<Fundraisers />} />
+                <Route path="students" element={<Students />} />
+                <Route path="users" element={<Users />} />
+                <Route path="chatbot" element={<Chatbot />} />
+                <Route path="settings" element={<Settings />} />
+              </Route>
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </Suspense>
+        </SosAlertProvider>
       </AuthProvider>
     </ToastProvider>
   );

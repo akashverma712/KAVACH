@@ -46,24 +46,36 @@ router.post('/register/start', authIpLimiter, authIdentifierLimiter, validate(re
   if (req.body.phone && !phone) throw badRequest('Enter a valid 10-digit Indian mobile number', 'INVALID_PHONE');
   if (!email && !phone) throw badRequest('Enter your college email or the phone number registered with the college', 'CONTACT_REQUIRED');
 
+  // ── Dev bypass: skip college records check for dev phone ──────
+  const isDevBypass = env.devBypass && (
+    (phone && phone === env.devBypass.phone) ||
+    (email && email === env.devBypass.email)
+  );
+
   const domain = env.allowedEmailDomain;
   let byEmail = null;
   let byPhone = null;
-  if (email) {
-    ({ rows: [byEmail] } = await query('SELECT * FROM college_records WHERE email = $1', [email]));
-    if (!byEmail && !email.endsWith(`@${domain}`)) {
-      throw badRequest(`This email is not in college records. Use your @${domain} email or the email you gave the college.`, 'EMAIL_NOT_ALLOWED');
+
+  if (!isDevBypass) {
+    if (email) {
+      ({ rows: [byEmail] } = await query('SELECT * FROM college_records WHERE email = $1', [email]));
+      if (!byEmail && !email.endsWith(`@${domain}`)) {
+        throw badRequest(`This email is not in college records. Use your @${domain} email or the email you gave the college.`, 'EMAIL_NOT_ALLOWED');
+      }
     }
-  }
-  if (phone) {
-    ({ rows: [byPhone] } = await query('SELECT * FROM college_records WHERE phone = $1', [phone]));
-    if (!byPhone) {
-      throw badRequest('This phone number is not in college records. Use the number registered at admission, or sign up with your college email.', 'PHONE_NOT_ALLOWED');
+    if (phone) {
+      ({ rows: [byPhone] } = await query('SELECT * FROM college_records WHERE phone = $1', [phone]));
+      if (!byPhone) {
+        throw badRequest('This phone number is not in college records. Use the number registered at admission, or sign up with your college email.', 'PHONE_NOT_ALLOWED');
+      }
     }
+    if (byEmail && byPhone && byEmail.id !== byPhone.id) {
+      throw badRequest('This email and phone number belong to different students in college records.', 'CONTACT_MISMATCH');
+    }
+  } else {
+    console.log(`[DEV BYPASS] Registration started for dev ${phone ? 'phone ' + phone : 'email ' + email} — college records check skipped`);
   }
-  if (byEmail && byPhone && byEmail.id !== byPhone.id) {
-    throw badRequest('This email and phone number belong to different students in college records.', 'CONTACT_MISMATCH');
-  }
+
   const record = byEmail || byPhone || null;
 
   const { rows: existing } = await query(
@@ -85,6 +97,17 @@ router.post('/register/start', authIpLimiter, authIdentifierLimiter, validate(re
     ip: req.ip,
   });
   const channels = describeChannels(destinations);
+
+  if (isDevBypass) {
+    // Skip sending actual OTP, just return the session
+    console.log(`[DEV BYPASS] Use OTP "${env.devBypass.otp}" to verify registration`);
+    return res.status(201).json({
+      otp_id: otpId,
+      channels,
+      delivery: channels.length === 1 ? { channel: channels[0].type, masked: channels[0].masked, expiresIn: env.otp.ttlSeconds, resendIn: env.otp.resendCooldownSeconds } : null,
+    });
+  }
+
   const delivery = channels.length === 1 ? await sendOtp(otpId, channels[0].type, { purposes: ['register'] }) : null;
   res.status(201).json({ otp_id: otpId, channels, delivery });
 }));
@@ -127,6 +150,31 @@ router.post('/login/start', authIpLimiter, authIdentifierLimiter, validate(login
   const email = normalizeEmail(identifier);
   const phone = email ? null : normalizePhone(identifier);
   const fields = `${USER_FIELDS}, password_hash, suspended_until, moderation_reason, token_version`;
+
+  // ── Dev bypass: skip password check for dev phone ─────────────
+  if (env.devBypass && phone && phone === env.devBypass.phone) {
+    let { rows: [user] } = await query(`SELECT ${fields} FROM users WHERE phone = $1`, [phone]);
+    if (!user) {
+      // Auto-create a dev user so the bypass works without manual seeding
+      const devHash = await bcrypt.hash('DevPass1', env.bcryptRounds);
+      ({ rows: [user] } = await query(
+        `INSERT INTO users (name, phone, password_hash, branch, batch, regd_no, last_login_at)
+         VALUES ('Dev Bypass User', $1, $2, 'Development', '2024-2028', 'DEV001', now())
+         ON CONFLICT (phone) DO UPDATE SET last_login_at = now()
+         RETURNING ${fields}`,
+        [phone, devHash],
+      ));
+    }
+    const destinations = Object.fromEntries(Object.entries({ email: user.email, phone: user.phone }).filter(([, v]) => v));
+    const otpId = await createOtpSession({ purpose: 'login', userId: user.id, destinations, ip: req.ip });
+    const channels = describeChannels(destinations);
+    console.log(`[DEV BYPASS] Login started for dev phone ${phone} — use OTP "${env.devBypass.otp}" to verify`);
+    return res.json({
+      otp_id: otpId,
+      channels,
+      delivery: channels.length === 1 ? { channel: channels[0].type, masked: channels[0].masked, expiresIn: env.otp.ttlSeconds, resendIn: env.otp.resendCooldownSeconds } : null,
+    });
+  }
 
   let candidates;
   if (email) ({ rows: candidates } = await query(`SELECT ${fields} FROM users WHERE email = $1`, [email]));
@@ -232,7 +280,9 @@ router.post('/check-eligibility', authIpLimiter, validate(z.object({
   if (req.body.email) {
     const email = normalizeEmail(req.body.email);
     if (!email) out.email = { ok: false, message: 'Enter a valid email address' };
-    else {
+    else if (env.devBypass && email === env.devBypass.email) {
+      out.email = { ok: true, message: 'Dev bypass email' };
+    } else {
       const { rows } = await query('SELECT 1 FROM college_records WHERE email = $1', [email]);
       out.email = rows.length || email.endsWith(`@${env.allowedEmailDomain}`)
         ? { ok: true, message: rows.length ? 'Found in college records' : `College email (@${env.allowedEmailDomain})` }
@@ -242,7 +292,9 @@ router.post('/check-eligibility', authIpLimiter, validate(z.object({
   if (req.body.phone) {
     const phone = normalizePhone(req.body.phone);
     if (!phone) out.phone = { ok: false, message: 'Enter a valid 10-digit mobile number' };
-    else {
+    else if (env.devBypass && phone === env.devBypass.phone) {
+      out.phone = { ok: true, message: 'Dev bypass phone' };
+    } else {
       const { rows } = await query('SELECT 1 FROM college_records WHERE phone = $1', [phone]);
       out.phone = rows.length ? { ok: true, message: 'Found in college records' } : { ok: false, message: 'Not found in college records' };
     }

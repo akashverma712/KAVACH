@@ -1,12 +1,65 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { Eye, EyeOff, Flag, Mail, MessageSquareWarning, Phone, Search, Trash2 } from 'lucide-react';
+import { Eye, EyeOff, Flag, Lock, Mail, MessageCircle, MessageSquareWarning, Phone, Search, ThumbsUp, Trash2, TrendingUp, Users } from 'lucide-react';
 import { Drawer, PageHeader, Pagination, TableShell, Td, Th } from '../components/kit';
 import { ModerateUser } from '../components/ModerateUser';
 import { Badge, Button, EmptyState, Input, Modal, PageLoader, Select, Spinner, Textarea } from '../components/ui';
 import { useToast } from '../context/ToastContext';
 import { api } from '../lib/api';
 import { CATEGORIES, REPORT_REASONS, SEVERITY, STATUS, dateTime, timeAgo } from '../lib/format';
+
+const PRIORITY = {
+  critical: { label: 'Critical', tone: 'signal', bar: 'bg-signal' },
+  high: { label: 'High', tone: 'brass', bar: 'bg-brass' },
+  medium: { label: 'Medium', tone: 'ink', bar: 'bg-ink/60' },
+  low: { label: 'Low', tone: 'muted', bar: 'bg-muted/40' },
+};
+
+export function VisibilityBadge({ visibility }) {
+  return visibility === 'admin'
+    ? <Badge tone="ink"><Lock className="h-3.5 w-3.5" /> Admin only</Badge>
+    : <Badge tone="muted"><Users className="h-3.5 w-3.5" /> Everyone</Badge>;
+}
+
+function PriorityCell({ p, max }) {
+  const pr = PRIORITY[p.priority_level] || PRIORITY.low;
+  return (
+    <div className="min-w-[120px]" title={`Severity ${p.severity} × 10 + ${p.like_count} likes × 2 + ${p.comment_count} comments × 3 = ${p.priority_score}`}>
+      <div className="flex items-center justify-between gap-2 text-sm"><span className="font-bold tabular-nums">{p.priority_score}</span><Badge tone={pr.tone}>{pr.label}</Badge></div>
+      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-line"><div className={`h-full rounded-full ${pr.bar}`} style={{ width: `${Math.max(6, (p.priority_score / Math.max(max, 1)) * 100)}%` }} /></div>
+    </div>
+  );
+}
+
+function Insights({ data, onFilter }) {
+  if (!data) return null;
+  const t = data.totals;
+  const maxScore = Math.max(1, ...data.categories.map((c) => c.score));
+  return (
+    <section className="mb-6 grid gap-4 lg:grid-cols-[1fr_1.2fr]">
+      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-panel border border-line bg-line">
+        <button type="button" onClick={() => onFilter('all')} className="bg-surface px-4 py-3.5 text-left hover:bg-raised"><p className="text-sm font-bold text-muted">Active problems</p><p className="font-display text-2xl font-extrabold">{t.active}</p><p className="text-xs text-muted">{t.active_high_severity} high or critical severity</p></button>
+        <button type="button" onClick={() => onFilter('admin')} className="bg-surface px-4 py-3.5 text-left hover:bg-raised"><p className="flex items-center gap-1.5 text-sm font-bold text-muted"><Lock className="h-3.5 w-3.5" /> Admin only</p><p className="font-display text-2xl font-extrabold">{t.active_admin_only}</p><p className="text-xs text-muted">private, only you can see them</p></button>
+        <button type="button" onClick={() => onFilter('everyone')} className="bg-surface px-4 py-3.5 text-left hover:bg-raised"><p className="flex items-center gap-1.5 text-sm font-bold text-muted"><Users className="h-3.5 w-3.5" /> Everyone</p><p className="font-display text-2xl font-extrabold">{t.active_everyone}</p><p className="text-xs text-muted">shared with all students</p></button>
+        <div className="bg-surface px-4 py-3.5"><p className="text-sm font-bold text-muted">Student responses, 30 days</p><p className="font-display text-2xl font-extrabold">{t.likes_30d + t.comments_30d}</p><p className="text-xs text-muted">{t.likes_30d} likes, {t.comments_30d} comments</p></div>
+      </div>
+      <div className="panel p-4">
+        <p className="flex items-center gap-2 font-bold"><TrendingUp className="h-4 w-4" /> Where the pressure is</p>
+        <p className="text-xs text-muted">Active problems by category, ranked by total priority ({data.priority_formula.text})</p>
+        <ul className="mt-3 space-y-2">
+          {data.categories.length === 0 && <li className="text-sm text-muted">No active problems.</li>}
+          {data.categories.map((c) => (
+            <li key={c.category} className="grid grid-cols-[110px_1fr_auto] items-center gap-3 text-sm">
+              <span className="truncate font-bold">{CATEGORIES[c.category] || c.category}</span>
+              <span className="h-2 overflow-hidden rounded-full bg-line"><span className="block h-full rounded-full bg-ink/70" style={{ width: `${(c.score / maxScore) * 100}%` }} /></span>
+              <span className="whitespace-nowrap text-xs text-muted">{c.problems} problem{c.problems === 1 ? '' : 's'}, {c.likes} likes, {c.comments} comments</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    </section>
+  );
+}
 
 const ADMIN_STATUSES = ['open', 'marked_for_solving', 'in_progress', 'under_review', 'solved'];
 
@@ -57,6 +110,8 @@ function ProblemDrawer({ id, onClose, onChanged }) {
       {!d ? <div className="flex justify-center py-20"><Spinner /></div> : (
         <div className="space-y-7">
           <div className="flex flex-wrap gap-2">
+            <VisibilityBadge visibility={p.visibility} />
+            <Badge tone={(PRIORITY[p.priority_level] || PRIORITY.low).tone}>Priority {p.priority_score}, {(PRIORITY[p.priority_level] || PRIORITY.low).label}</Badge>
             <Badge tone={STATUS[p.status].tone} dot>{STATUS[p.status].label}</Badge>
             <Badge tone={SEVERITY[p.severity].tone}>{SEVERITY[p.severity].label} severity</Badge>
             <Badge tone="muted">{CATEGORIES[p.category]}</Badge>
@@ -91,7 +146,14 @@ function ProblemDrawer({ id, onClose, onChanged }) {
                 {p.images.map((src) => <button key={src} type="button" onClick={() => setImg(src)} className="aspect-square overflow-hidden rounded-control bg-raised"><img src={src} alt="" className="h-full w-full object-cover" /></button>)}
               </div>
             )}
-            <p className="mt-3 text-sm text-muted">{p.reaction_total} reactions, {p.comment_count} comments</p>
+            {p.visibility === 'admin' ? (
+              <p className="mt-3 flex items-start gap-2 rounded-control bg-raised px-3 py-2.5 text-sm"><Lock className="mt-0.5 h-4 w-4 shrink-0" /> Posted privately: only the student and admins can see it. Likes and comments are off, so its priority comes from severity. Reply through status updates below.</p>
+            ) : (
+              <p className="mt-3 flex items-center gap-4 text-sm text-muted">
+                <span className="inline-flex items-center gap-1.5"><ThumbsUp className="h-4 w-4" /> <b className="text-ink">{p.like_count}</b> student{p.like_count === 1 ? '' : 's'} face this too</span>
+                <span className="inline-flex items-center gap-1.5"><MessageCircle className="h-4 w-4" /> <b className="text-ink">{p.comment_count}</b> comment{p.comment_count === 1 ? '' : 's'} from {p.commenter_count} student{p.commenter_count === 1 ? '' : 's'}</span>
+              </p>
+            )}
           </section>
 
           {p.status !== 'closed' ? (
@@ -138,7 +200,7 @@ function ProblemDrawer({ id, onClose, onChanged }) {
             </section>
           )}
 
-          <section>
+          {p.visibility !== 'admin' && <section>
             <h3 className="font-bold">Comments ({d.comments.filter((c) => !c.is_deleted).length})</h3>
             <ul className="mt-3 space-y-2">
               {d.comments.length === 0 && <li className="text-muted">No comments.</li>}
@@ -152,7 +214,7 @@ function ProblemDrawer({ id, onClose, onChanged }) {
                 </li>
               ))}
             </ul>
-          </section>
+          </section>}
 
           <div className="border-t border-line pt-5">
             {p.is_hidden
@@ -174,11 +236,12 @@ function ProblemDrawer({ id, onClose, onChanged }) {
 export default function Problems() {
   const toast = useToast();
   const [params, setParams] = useSearchParams();
-  const [f, setF] = useState({ sort: 'recent', status: 'active', severity: 'all', visibility: 'all' });
+  const [f, setF] = useState({ sort: 'priority', status: 'active', severity: 'all', visibility: 'all' });
   const [q, setQ] = useState('');
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(1);
   const [data, setData] = useState(null);
+  const [insights, setInsights] = useState(null);
   const openId = params.get('open');
 
   useEffect(() => { const t = setTimeout(() => setQuery(q.trim()), 350); return () => clearTimeout(t); }, [q]);
@@ -187,17 +250,37 @@ export default function Problems() {
     if (query) qs.set('q', query);
     return api(`/admin/posts?${qs}`).then(setData).catch((e) => toast.error(e.message));
   }, [f, page, query, toast]);
+  const loadInsights = useCallback(() => api('/admin/posts/insights').then(setInsights).catch(() => {}), []);
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadInsights(); }, [loadInsights]);
 
   const setFilter = (k) => (e) => { setF({ ...f, [k]: e.target.value }); setPage(1); };
+  const maxScore = Math.max(1, ...(data?.items || []).map((p) => p.priority_score));
 
   return (
     <div>
-      <PageHeader title="Problems">Track what students raise, update them as work progresses, and sort by when it was posted or how severe it is.</PageHeader>
+      <PageHeader title="Problems">
+        Ranked by priority so the most pressing problems come first. Priority = {data?.priority_formula?.text || 'severity × 10 + likes × 2 + comments × 3'}.
+      </PageHeader>
+
+      <Insights data={insights} onFilter={(v) => { setF({ ...f, visibility: v }); setPage(1); }} />
+
       <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <div className="sm:col-span-2 lg:col-span-1"><Input aria-label="Search" icon={Search} placeholder="Search title or student" value={q} onChange={(e) => setQ(e.target.value)} /></div>
         <Select aria-label="Sort" value={f.sort} onChange={setFilter('sort')}>
-          <option value="recent">Newest first</option><option value="oldest">Oldest first</option><option value="severity">Most severe first</option><option value="reports">Most reported first</option>
+          <option value="priority">Highest priority first</option>
+          <option value="likes">Most liked first</option>
+          <option value="comments">Most discussed first</option>
+          <option value="severity">Most severe first</option>
+          <option value="recent">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="reports">Most reported first</option>
+        </Select>
+        <Select aria-label="Who can see it" value={f.visibility} onChange={setFilter('visibility')}>
+          <option value="all">Everyone + admin only</option>
+          <option value="everyone">Shared with everyone</option>
+          <option value="admin">Admin only (private)</option>
+          <option value="hidden">Hidden by moderation</option>
         </Select>
         <Select aria-label="Status" value={f.status} onChange={setFilter('status')}>
           <option value="active">All active</option><option value="all">All statuses</option>
@@ -207,36 +290,41 @@ export default function Problems() {
           <option value="all">Any severity</option>
           {[4, 3, 2, 1].map((s) => <option key={s} value={s}>{SEVERITY[s].label}</option>)}
         </Select>
-        <Select aria-label="Visibility" value={f.visibility} onChange={setFilter('visibility')}>
-          <option value="all">Visible and hidden</option><option value="visible">Visible only</option><option value="hidden">Hidden only</option>
-        </Select>
       </div>
 
       {!data ? <PageLoader /> : data.items.length === 0 ? (
         <div className="panel"><EmptyState icon={MessageSquareWarning} title="No problems match">Try changing the filters.</EmptyState></div>
       ) : (
         <TableShell footer={<Pagination page={data.page} limit={data.limit} total={data.total} onPage={setPage} />}>
-          <thead className="border-b border-line bg-raised"><tr><Th>Problem</Th><Th>Severity</Th><Th>Status</Th><Th>Student</Th><Th>Activity</Th><Th>Posted</Th></tr></thead>
+          <thead className="border-b border-line bg-raised"><tr><Th>Priority</Th><Th>Problem</Th><Th>Visibility</Th><Th>Responses</Th><Th>Severity</Th><Th>Status</Th><Th>Posted</Th></tr></thead>
           <tbody className="divide-y divide-line">
             {data.items.map((p) => (
               <tr key={p.id} className="cursor-pointer hover:bg-raised" onClick={() => setParams({ open: p.id })}>
-                <Td className="max-w-[340px]">
+                <Td><PriorityCell p={p} max={maxScore} /></Td>
+                <Td className="max-w-[320px]">
                   <button type="button" className="block w-full text-left font-bold hover:underline" onClick={(e) => { e.stopPropagation(); setParams({ open: p.id }); }}>
                     <span className="line-clamp-1">{p.title}</span>
                   </button>
-                  <span className="flex items-center gap-2 text-sm text-muted">{CATEGORIES[p.category]}{p.is_hidden && <span className="inline-flex items-center gap-1 text-brass"><EyeOff className="h-3.5 w-3.5" /> hidden</span>}{p.report_count > 0 && <span className="inline-flex items-center gap-1 text-signal"><Flag className="h-3.5 w-3.5" /> {p.report_count}</span>}</span>
+                  <span className="flex items-center gap-2 text-sm text-muted">{p.author_name}, {CATEGORIES[p.category]}{p.is_hidden && <span className="inline-flex items-center gap-1 text-brass"><EyeOff className="h-3.5 w-3.5" /> hidden</span>}{p.report_count > 0 && <span className="inline-flex items-center gap-1 text-signal"><Flag className="h-3.5 w-3.5" /> {p.report_count}</span>}</span>
                 </Td>
-                <Td><span className="inline-flex items-center gap-2"><span className={`h-2.5 w-2.5 rounded-full ${SEVERITY[p.severity].bar}`} />{SEVERITY[p.severity].label}</span></Td>
+                <Td><VisibilityBadge visibility={p.visibility} /></Td>
+                <Td className="whitespace-nowrap text-sm">
+                  {p.visibility === 'admin' ? <span className="text-muted">Private</span> : (
+                    <span className="inline-flex items-center gap-3">
+                      <span className="inline-flex items-center gap-1" title="Likes"><ThumbsUp className="h-3.5 w-3.5 text-muted" /> <b>{p.like_count}</b></span>
+                      <span className="inline-flex items-center gap-1" title="Comments"><MessageCircle className="h-3.5 w-3.5 text-muted" /> <b>{p.comment_count}</b></span>
+                    </span>
+                  )}
+                </Td>
+                <Td><span className="inline-flex items-center gap-2 whitespace-nowrap"><span className={`h-2.5 w-2.5 rounded-full ${SEVERITY[p.severity].bar}`} />{SEVERITY[p.severity].label}</span></Td>
                 <Td><Badge tone={STATUS[p.status].tone}>{STATUS[p.status].label}</Badge></Td>
-                <Td className="whitespace-nowrap">{p.author_name}</Td>
-                <Td className="whitespace-nowrap text-muted">{p.reaction_total} reactions, {p.comment_count} comments</Td>
                 <Td className="whitespace-nowrap text-muted">{timeAgo(p.created_at)}</Td>
               </tr>
             ))}
           </tbody>
         </TableShell>
       )}
-      {openId && <ProblemDrawer id={openId} onClose={() => setParams({})} onChanged={() => { load(); window.dispatchEvent(new Event('kavach-refresh-counts')); }} />}
+      {openId && <ProblemDrawer id={openId} onClose={() => setParams({})} onChanged={() => { load(); loadInsights(); window.dispatchEvent(new Event('kavach-refresh-counts')); }} />}
     </div>
   );
 }

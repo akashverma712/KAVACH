@@ -7,6 +7,7 @@ import { adminWriteLimiter } from '../../middleware/rateLimit.js';
 import { validate } from '../../middleware/validate.js';
 import { audit } from '../../services/activity.service.js';
 import { answerQuestion } from '../../services/chatbot.service.js';
+import { priorityLevel, prioritySql } from '../../services/priority.service.js';
 import { getAdminEmergencyContact, setSetting } from '../../services/settings.service.js';
 import { ah, badRequest, notFound } from '../../utils/errors.js';
 import { paginate } from '../../utils/paginate.js';
@@ -15,6 +16,7 @@ import { uuid } from '../schemas.js';
 import authRoutes from './auth.routes.js';
 import fundraiserRoutes from './fundraisers.routes.js';
 import { postsRouter, reportsRouter } from './posts.routes.js';
+import sosRoutes from './sos.routes.js';
 import studentRoutes from './students.routes.js';
 import userRoutes from './users.routes.js';
 
@@ -47,9 +49,12 @@ router.get('/dashboard', ah(async (_req, res) => {
     query(`SELECT status, count(*)::int AS n FROM posts GROUP BY status`),
     query(`SELECT s.id, s.lat, s.lng, s.trigger, s.status, s.acknowledged_at, s.created_at, u.name, u.regd_no, u.phone
              FROM sos_events s JOIN users u ON u.id = s.user_id ORDER BY s.created_at DESC LIMIT 6`),
-    query(`SELECT p.id, p.title, p.severity, p.status, p.created_at, p.report_count, u.name AS author_name
+    query(`SELECT p.id, p.title, p.severity, p.status, p.created_at, p.report_count, p.visibility,
+                  u.name AS author_name,
+                  (SELECT count(*)::int FROM reactions r WHERE r.post_id = p.id) AS like_count,
+                  (SELECT count(*)::int FROM comments c WHERE c.post_id = p.id AND NOT c.is_deleted) AS comment_count
              FROM posts p JOIN users u ON u.id = p.user_id WHERE p.status <> 'closed'
-             ORDER BY p.severity DESC, p.created_at DESC LIMIT 6`),
+             ORDER BY (p.severity * 10 + (SELECT count(*)::int FROM reactions r WHERE r.post_id = p.id) * 2 + (SELECT count(*)::int FROM comments c WHERE c.post_id = p.id AND NOT c.is_deleted) * 3) DESC, p.created_at DESC LIMIT 6`),
     query(`SELECT f.id, f.title, f.amount_needed, f.severity, f.created_at, u.name AS organiser_name
              FROM fundraisers f JOIN users u ON u.id = f.user_id WHERE f.status = 'pending' ORDER BY f.created_at LIMIT 5`),
     query(`SELECT to_char(d, 'YYYY-MM-DD') AS day,
@@ -61,42 +66,17 @@ router.get('/dashboard', ah(async (_req, res) => {
     stats,
     problems_by_status: Object.fromEntries(byStatus.map((r) => [r.status, r.n])),
     recent_sos: sos,
-    urgent_problems: posts,
+    urgent_problems: posts.map((p) => {
+      const score = (p.severity * 10) + (p.like_count * 2) + (p.comment_count * 3);
+      return { ...p, priority_score: score, priority_level: priorityLevel(score) };
+    }),
     pending_fundraisers: funds,
     trend,
     delivery: delivery(),
   });
 }));
 
-/* ───────────── SOS alerts ───────────── */
-
-router.get('/sos', ah(async (req, res) => {
-  const { page, limit, offset } = paginate(req.query, { defaultLimit: 25, maxLimit: 100 });
-  const filter = req.query.filter === 'unacknowledged' ? 'WHERE s.acknowledged_at IS NULL' : '';
-  const [{ rows }, { rows: [{ total }] }] = await Promise.all([
-    query(
-      `SELECT s.*, u.name, u.regd_no, u.phone, u.email, u.branch, u.batch, a.name AS acknowledged_by_name
-         FROM sos_events s JOIN users u ON u.id = s.user_id LEFT JOIN admins a ON a.id = s.acknowledged_by
-         ${filter} ORDER BY s.created_at DESC LIMIT $1 OFFSET $2`,
-      [limit, offset],
-    ),
-    query(`SELECT count(*)::int AS total FROM sos_events s ${filter}`),
-  ]);
-  res.json({ items: rows, total, page, limit });
-}));
-
-router.post('/sos/:id/acknowledge', validate(z.object({ id: uuid }), 'params'), validate(z.object({
-  note: z.string().trim().max(500).optional(),
-}).strict()), ah(async (req, res) => {
-  const { rows: [s] } = await query(
-    `UPDATE sos_events SET acknowledged_at = COALESCE(acknowledged_at, now()), acknowledged_by = COALESCE(acknowledged_by, $2), admin_note = COALESCE($3, admin_note)
-      WHERE id = $1 RETURNING id, acknowledged_at`,
-    [req.params.id, req.admin.id, req.body.note || null],
-  );
-  if (!s) throw notFound('Alert not found');
-  await audit(req, 'sos.acknowledge', s.id);
-  res.json(s);
-}));
+router.use('/sos', sosRoutes);
 
 /* ───────────── Chatbot knowledge base ───────────── */
 

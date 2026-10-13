@@ -12,6 +12,7 @@
   "dependencies": {
     "@fontsource-variable/bricolage-grotesque": "^5.1.0",
     "@fontsource/atkinson-hyperlegible": "^5.1.0",
+    "framer-motion": "^14.1.0",
     "kavach": "file:..",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.460.0",
